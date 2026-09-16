@@ -1,0 +1,1 @@
+export default {navigationBarTitleText:'厨临门',enablePullDownRefresh:true,backgroundTextStyle:'dark'};

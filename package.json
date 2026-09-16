@@ -1,0 +1,36 @@
+{
+  "name": "home-chef",
+  "private": true,
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=22.12 <23"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "release:check": "tsx scripts/check-release.ts",
+    "db:backup": "node scripts/backup-db.mjs",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "test:integration": "bash scripts/test-integration.sh",
+    "db:generate": "prisma generate --schema prisma/schema.prisma",
+    "db:validate": "prisma validate --schema prisma/schema.prisma",
+    "db:migrate": "prisma migrate deploy",
+    "db:seed": "tsx prisma/bootstrap.ts",
+    "db:seed:demo": "tsx prisma/seed.ts",
+    "dev:miniapp": "pnpm --filter @home-chef/miniapp dev:weapp",
+    "test:maps": "node --env-file=.env tests/maps-browser.mjs",
+    "test:ui": "bash scripts/test-business-ui.sh",
+    "test:wechat": "bash scripts/test-wechat-pay.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@prisma/client": "^6.1.0",
+    "turbo": "^2.3.0",
+    "prisma": "^6.1.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0",
+    "playwright": "1.51.1"
+  }
+}

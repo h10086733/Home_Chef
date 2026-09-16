@@ -1,0 +1,29 @@
+# Replace chef.example.com and certificate paths. Test with nginx -t before reload.
+server {
+    listen 80;
+    server_name chef.example.com;
+    return 301 https://chef.example.com$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name chef.example.com;
+    ssl_certificate /etc/letsencrypt/live/chef.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/chef.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    root /srv/home-chef/apps/admin-web/dist;
+    index index.html;
+    client_max_body_size 5m;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    location ^~ /api/internal/ { return 404; }
+    location ^~ /internal/ { return 404; }
+    location /api/ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 75s;
+        add_header Cache-Control no-store always;
+    }
+    location / { try_files $uri $uri/ /index.html; }
+}

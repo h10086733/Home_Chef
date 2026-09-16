@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+.turbo/
+*.log
+
+.data/
+dist-h5/
+scripts/pnpm
+scripts/pnpx
+
+.secrets/
+*.pem
+*.p12

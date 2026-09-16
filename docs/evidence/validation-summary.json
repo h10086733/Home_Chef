@@ -1,0 +1,17 @@
+{
+  "date": "2026-09-14",
+  "mode": "local-sandbox",
+  "typecheck": "passed",
+  "unit_tests": "passed",
+  "postgres_integration_scenarios": 15,
+  "postgres_integration": "passed",
+  "web_browser_e2e": "passed",
+  "taro_h5_browser_e2e": "passed",
+  "weapp_build": "passed",
+  "h5_build": "passed",
+  "wechat_device_test": "not_run",
+  "notes": [
+    "网页服务在一次批量构建期间退出，恢复服务后浏览器交易验收已重新通过。",
+    "微信支付、实名、保险和结算为明确的开发沙箱，不能视为正式渠道验收。"
+  ]
+}

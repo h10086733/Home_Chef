@@ -1,0 +1,418 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  CHEF
+  OPERATOR
+  REVIEWER
+  CUSTOMER_SERVICE
+  FINANCE
+  RISK
+  FINANCE_MANAGER
+  ADMIN
+}
+
+enum ContractStatus {
+  PENDING_PAYMENT
+  PENDING_ACCEPTANCE
+  ACCEPTED
+  PAYMENT_EXCEPTION
+  FULFILLED
+  CLOSED
+  CANCELLED
+}
+
+enum PaymentSummaryStatus {
+  UNPAID
+  DEPOSIT_PAID
+  FULLY_PAID
+  PARTIALLY_REFUNDED
+  FULLY_REFUNDED
+}
+
+enum PaymentKind {
+  DEPOSIT
+  FULL_PAYMENT
+  BALANCE
+  ADDITIONAL
+  REFUND
+}
+
+enum PaymentRequestStatus {
+  CREATED
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  EXPIRED
+  REFUNDED
+}
+
+enum ChefOrderStatus {
+  UNASSIGNED
+  INVITED
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+
+model User {
+  username String? @unique
+  passwordHash String?
+  id           String   @id @default(cuid())
+  openId       String?  @unique
+  phone        String?  @unique
+  displayName  String?
+  roles        UserRole[] @default([])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  addresses    Address[]
+  chefProfile  Chef?
+  customerOrders Order[] @relation("CustomerOrders")
+  quotes       Quote[]
+  auditEvents  AuditEvent[]
+}
+
+model Address {
+  id           String   @id @default(cuid())
+  userId       String
+  label        String
+  regionCode   String
+  latitude     Decimal? @db.Decimal(10, 7)
+  longitude    Decimal? @db.Decimal(10, 7)
+  maskedText   String?
+  encryptedText String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  user         User     @relation(fields: [userId], references: [id])
+  orders       Order[]
+  @@index([userId])
+}
+
+model Chef {
+  data Json @default("{}")
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  status         String   @default("PENDING_REVIEW")
+  healthValidUntil DateTime?
+  serviceRadiusM Int      @default(3000)
+  acceptingOrders Boolean @default(false)
+  user           User     @relation(fields: [userId], references: [id])
+  packages       ServicePackage[]
+  quotes         Quote[]
+  chefOrders     ChefOrder[]
+  schedules      ScheduleSlot[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model ServicePackage {
+  id          String   @id @default(cuid())
+  chefId      String
+  name        String
+  description String?
+  serviceFen  Int
+  active      Boolean  @default(true)
+  version     Int      @default(1)
+  chef        Chef     @relation(fields: [chefId], references: [id])
+  quotes      Quote[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  @@index([chefId, active])
+}
+
+model ScheduleSlot {
+  id        String   @id @default(cuid())
+  chefId    String
+  startsAt  DateTime
+  endsAt    DateTime
+  status    String   @default("AVAILABLE")
+  chef      Chef     @relation(fields: [chefId], references: [id])
+  orders    Order[]
+  @@index([chefId, startsAt, endsAt])
+}
+
+model Quote {
+  details Json @default("{}")
+  id             String   @id @default(cuid())
+  chefId         String
+  packageId      String?
+  customerId     String
+  totalFen       Int
+  depositFen     Int
+  balanceFen     Int
+  ruleVersion    String
+  expiresAt      DateTime
+  status         String   @default("ACTIVE")
+  chef           Chef     @relation(fields: [chefId], references: [id])
+  package        ServicePackage? @relation(fields: [packageId], references: [id])
+  customer       User     @relation(fields: [customerId], references: [id])
+  order          Order?
+  createdAt      DateTime @default(now())
+  @@index([customerId, status, expiresAt])
+}
+
+model Order {
+  fulfillmentStatus String @default("INELIGIBLE")
+  feeStatus String @default("ESTIMATE_CONFIRMED")
+  aftersaleStatus String @default("NONE")
+  settlementStatus String @default("INELIGIBLE")
+  reviewStatus String @default("INELIGIBLE")
+  details Json @default("{}")
+  id             String   @id @default(cuid())
+  customerId     String
+  addressId      String
+  quoteId        String   @unique
+  slotId         String?
+  contractStatus ContractStatus @default(PENDING_PAYMENT)
+  paymentStatus  PaymentSummaryStatus @default(UNPAID)
+  totalFen       Int
+  depositFen     Int
+  receivedFen    Int      @default(0)
+  refundedFen    Int      @default(0)
+  balanceFen     Int
+  ruleSnapshot   Json
+  acceptedChefId String?
+  serviceEndsAt  DateTime?
+  confirmedAt    DateTime?
+  customer       User     @relation("CustomerOrders", fields: [customerId], references: [id])
+  address        Address  @relation(fields: [addressId], references: [id])
+  quote          Quote    @relation(fields: [quoteId], references: [id])
+  slot           ScheduleSlot? @relation(fields: [slotId], references: [id])
+  payments       PaymentRequest[]
+  chefOrders     ChefOrder[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  @@index([customerId, createdAt])
+  @@index([contractStatus, createdAt])
+}
+
+model ChefOrder {
+  id        String @id @default(cuid())
+  orderId   String
+  chefId    String
+  distanceM Int?
+  urgent    Boolean @default(false)
+  ruleVersion String?
+  invitedAt DateTime @default(now())
+  status    ChefOrderStatus @default(INVITED)
+  expiresAt DateTime?
+  order     Order @relation(fields: [orderId], references: [id])
+  chef      Chef  @relation(fields: [chefId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([orderId, chefId])
+  @@index([chefId, status, expiresAt])
+}
+
+model PaymentRequest {
+  id             String @id @default(cuid())
+  orderId        String
+  kind           PaymentKind
+  amountFen      Int
+  status         PaymentRequestStatus @default(CREATED)
+  idempotencyKey String @unique
+  provider       String?
+  providerRef    String?
+  rawEvent       Json?
+  order          Order @relation(fields: [orderId], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  @@index([orderId, kind, status])
+}
+
+model AuditEvent {
+  id           String   @id @default(cuid())
+  actorId      String?
+  action       String
+  aggregateType String
+  aggregateId  String
+  before       Json?
+  after        Json?
+  reason       String?
+  traceId      String?
+  createdAt    DateTime @default(now())
+  actor        User?    @relation(fields: [actorId], references: [id])
+  @@index([aggregateType, aggregateId, createdAt])
+}
+
+model OutboxEvent {
+  id           String   @id @default(cuid())
+  eventType    String
+  aggregateType String
+  aggregateId  String
+  payload      Json
+  occurredAt   DateTime @default(now())
+  publishedAt  DateTime?
+  attempts     Int      @default(0)
+  @@index([publishedAt, occurredAt])
+}
+
+model AppSession {
+  id String @id
+  userId String
+  expiresAt DateTime
+  @@index([userId])
+}
+model BookingLock {
+  id String @id @default(cuid())
+  chefId String
+  quoteId String @unique
+  orderId String? @unique
+  startsAt DateTime
+  endsAt DateTime
+  expiresAt DateTime?
+  @@index([chefId, startsAt, endsAt])
+}
+model LedgerEntry {
+  id String @id @default(cuid())
+  orderId String
+  reference String @unique
+  kind String
+  amountFen Int
+  createdAt DateTime @default(now())
+}
+model Notification {
+  id String @id @default(cuid())
+  userId String
+  orderId String?
+  body String
+  readAt DateTime?
+  createdAt DateTime @default(now())
+  @@index([userId, createdAt])
+}
+model ChatMessage {
+  id String @id @default(cuid())
+  orderId String
+  senderId String
+  body String
+  blocked Boolean @default(false)
+  createdAt DateTime @default(now())
+  @@index([orderId, createdAt])
+}
+model ServiceTicket {
+  id String @id @default(cuid())
+  orderId String
+  userId String
+  reason String
+  status String @default("OPEN")
+  refundFen Int?
+  proposedBy String?
+  approvedBy String?
+  executedBy String?
+  decision String?
+  createdAt DateTime @default(now())
+}
+model InsurancePolicy {
+  id String @id @default(cuid())
+  orderId String @unique
+  provider String @default("sandbox")
+  status String @default("SANDBOX_ACTIVE")
+  reference String @unique
+  claimReason String?
+}
+model Review {
+  id String @id @default(cuid())
+  orderId String @unique
+  userId String
+  chefId String
+  taste Int
+  service Int
+  punctuality Int
+  body String
+  followup String?
+  anonymous Boolean @default(false)
+  hidden Boolean @default(false)
+  createdAt DateTime @default(now())
+}
+model Coupon {
+  id String @id @default(cuid())
+  userId String
+  label String
+  amountFen Int
+  minFen Int
+  regionCode String
+  expiresAt DateTime
+  status String @default("AVAILABLE")
+  orderId String? @unique
+  ruleVersion String
+}
+model FileAsset {
+  id String @id @default(cuid())
+  userId String
+  orderId String?
+  mime String
+  bytes Bytes
+  sha256 String
+  createdAt DateTime @default(now())
+}
+model PlatformRule {
+  id String @id
+  data Json
+  createdAt DateTime @default(now())
+  publishedBy String
+}
+model Favorite {
+  id String @id @default(cuid())
+  userId String
+  chefId String
+  @@unique([userId, chefId])
+}
+
+model ChefSettlement {
+  id String @id @default(cuid())
+  orderId String @unique
+  chefId String
+  mode String
+  status String
+  chefFen Int
+  commissionFen Int
+  subsidyFen Int
+  snapshot Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([chefId,status])
+}
+model ChefWalletEntry {
+  id String @id @default(cuid())
+  chefId String
+  reference String @unique
+  kind String
+  amountFen Int
+  createdAt DateTime @default(now())
+  @@index([chefId,createdAt])
+}
+model ChefWithdrawal {
+  id String @id @default(cuid())
+  chefId String
+  userId String
+  amountFen Int
+  status String @default("REQUESTED")
+  idempotencyKey String @unique
+  approvedBy String?
+  encryptedName String
+  metadata Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([chefId,createdAt])
+  @@index([status,updatedAt])
+}
+model ProfitShareTask {
+  id String @id @default(cuid())
+  settlementId String?
+  paymentId String @unique
+  orderId String
+  chefId String?
+  amountFen Int
+  status String @default("CREATED")
+  metadata Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([status,updatedAt])
+}

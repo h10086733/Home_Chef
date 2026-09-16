@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: home_chef
+      POSTGRES_PASSWORD: home_chef
+      POSTGRES_DB: home_chef
+    ports: ["127.0.0.1:55432:5432"]
+    volumes: ["home-chef-postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U home_chef"]
+      interval: 3s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:56379:6379"]
+    command: redis-server --appendonly yes
+    volumes: ["home-chef-redis:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 20
+volumes:
+  home-chef-postgres:
+  home-chef-redis:

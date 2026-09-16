@@ -1,0 +1,18 @@
+[Unit]
+Description=Home Chef scheduled financial reconciliation
+After=network-online.target home-chef-api.service
+Wants=network-online.target
+[Service]
+Type=simple
+User=homechef
+WorkingDirectory=/srv/home-chef
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node --env-file=/srv/home-chef/.env apps/worker/dist/main.js
+Restart=always
+RestartSec=5
+TimeoutStopSec=75
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,1 @@
+export default {permission:{'scope.userLocation':{desc:'用于在地图选择上门服务地址和接单出发位置'}},requiredPrivateInfos:['chooseLocation'],pages:['pages/index/index'],window:{navigationBarTitleText:'厨临门',navigationBarBackgroundColor:'#f8f7f2',navigationBarTextStyle:'black',backgroundColor:'#f8f7f2'}};

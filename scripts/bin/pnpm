@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec corepack pnpm@9.15.0 "$@"

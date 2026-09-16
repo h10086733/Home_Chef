@@ -1,0 +1,11 @@
+{
+  "miniprogramRoot": "dist/",
+  "projectname": "home-chef-mvp",
+  "appid": "touristappid",
+  "setting": {
+    "es6": true,
+    "minified": true,
+    "urlCheck": false
+  },
+  "compileType": "miniprogram"
+}
