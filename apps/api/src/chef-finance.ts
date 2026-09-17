@@ -1,3 +1,4 @@
+import {log,safeError} from '@home-chef/infrastructure';
 import {Prisma,User,Order,ChefWithdrawal,ProfitShareTask} from '@prisma/client';
 import {PaymentService} from './payments';
 import {obj,HOUR} from './service';
@@ -94,7 +95,7 @@ export class ChefFinanceService extends PaymentService {
   if(['FAIL','CANCELLED'].includes(r.state))await tx.chefWalletEntry.create({data:{chefId:w.chefId,reference:'release:'+w.id,kind:'WITHDRAWAL_RELEASE',amountFen:w.amountFen}});
   if(['SUCCESS','FAIL','CANCELLED'].includes(r.state)){await this.audit(tx,null,'WECHAT_TRANSFER_'+r.state,w.id,{amountFen:w.amountFen});await tx.notification.create({data:{userId:w.userId,body:r.state==='SUCCESS'?'微信提现已到账':'微信提现未完成，冻结金额已退回可提现余额'}});}
  });}
- async transferNotification(h:Record<string,any>,raw:string){await this.recordTransfer(this.gateway().notification(h,raw,'MCHTRANSFER.BILL.FINISHED','mch_payment'));}
+ async transferNotification(h:Record<string,any>,raw:string){const event=this.gateway().notification(h,raw,'MCHTRANSFER.BILL.FINISHED','mch_payment');await this.recordTransfer(event);log('info','transfer.callback.accepted',{jobId:event.out_bill_no});}
  async syncTransfer(id:string){
   let w=await this.db.chefWithdrawal.findUniqueOrThrow({where:{id}});if(!ACTIVE.includes(w.status)||w.status==='REQUESTED')return;const wx=this.gateway();
   if(this.clock().getTime()-w.createdAt.getTime()>29*24*HOUR){await this.transaction(async tx=>{const fresh=await tx.chefWithdrawal.findUniqueOrThrow({where:{id}});if(ACTIVE.includes(fresh.status)&&fresh.status!=='REQUESTED')await tx.chefWithdrawal.update({where:{id},data:{status:'REVIEW_REQUIRED',metadata:{...obj(fresh.metadata),reason:'超过自动查单期限，请财务核对微信资金账单；余额继续冻结'}}});});return;}
@@ -157,7 +158,7 @@ export class ChefFinanceService extends PaymentService {
  override async tick(){
   const result=await super.tick();if(!this.wx||this.financeRunning)return result;this.financeRunning=true;
   try{const withdrawals=await this.db.chefWithdrawal.findMany({where:{status:{in:ACTIVE.filter(s=>s!=='REQUESTED')}},orderBy:{updatedAt:'asc'},take:3});const shares=await this.db.profitShareTask.findMany({where:{status:{in:['CREATED','PROCESSING']}},orderBy:{updatedAt:'asc'},take:3});
-   await Promise.all([...withdrawals.map(w=>({kind:'withdrawal',id:w.id})),...shares.map(s=>({kind:'share',id:s.id}))].map(async job=>{try{if(job.kind==='withdrawal')await this.syncTransfer(job.id);else await this.syncShare(job.id);}catch(e){console.warn('Chef finance reconciliation pending',job.id,e instanceof ApiError?e.code:'NETWORK_OR_DATABASE');}finally{if(job.kind==='withdrawal')await this.db.chefWithdrawal.update({where:{id:job.id},data:{updatedAt:this.clock()}});else await this.db.profitShareTask.update({where:{id:job.id},data:{updatedAt:this.clock()}});}}));
+   await Promise.all([...withdrawals.map(w=>({kind:'withdrawal',id:w.id})),...shares.map(s=>({kind:'share',id:s.id}))].map(async job=>{try{if(job.kind==='withdrawal')await this.syncTransfer(job.id);else await this.syncShare(job.id);}catch(e){log('warn','finance.reconcile_pending',{jobId:job.id,kind:job.kind,...safeError(e)});}finally{if(job.kind==='withdrawal')await this.db.chefWithdrawal.update({where:{id:job.id},data:{updatedAt:this.clock()}});else await this.db.profitShareTask.update({where:{id:job.id},data:{updatedAt:this.clock()}});}}));
   }finally{this.financeRunning=false;}return result;
  }
 }

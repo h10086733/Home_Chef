@@ -20,7 +20,7 @@
     "db:seed": "tsx prisma/bootstrap.ts",
     "db:seed:demo": "tsx prisma/seed.ts",
     "dev:miniapp": "pnpm --filter @home-chef/miniapp dev:weapp",
-    "test:maps": "node --env-file=.env tests/maps-browser.mjs",
+    "test:maps": "bash scripts/test-business-ui.sh --maps-only",
     "test:ui": "bash scripts/test-business-ui.sh",
     "test:wechat": "bash scripts/test-wechat-pay.sh"
   },

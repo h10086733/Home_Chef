@@ -1,3 +1,5 @@
+import {randomUUID} from 'node:crypto';
+import {log,logContext,logRoute,safeError} from '@home-chef/infrastructure';
 import 'reflect-metadata';
 import { Get, Post, Delete, Controller, Module, Req, Res } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
@@ -10,7 +12,7 @@ import { ApiError, ensure } from './errors';
 
 
 const db = new PrismaClient();
-const service = new ChefFinanceService(db);
+let service:ChefFinanceService;
 const attempts=new Map<string,{count:number,until:number}>();
 @Controller()
 class ApiController {
@@ -34,11 +36,11 @@ class ApiController {
       }
       if(path==='/internal/tick'&&method==='POST'){ensure(process.env.INTERNAL_JOB_SECRET&&req.headers.authorization==='Bearer '+process.env.INTERNAL_JOB_SECRET,'FORBIDDEN','无权执行任务',403);return res.send(await service.tick());}
       const token=String(req.headers.authorization??'').replace(/^Bearer /,'');
-      const user=await service.session(token);
+      const user=await service.session(token);const context=logContext.getStore();if(context)context.userId=user.id;
       let result:unknown;
       if(path==='/runtime'&&method==='GET')result={mode:process.env.APP_MODE,paymentEnabled:!!service.wx,paymentChannel:'WECHAT_MINIPROGRAM',insuranceEnabled:process.env.APP_MODE==='sandbox',couponsEnabled:(await service.rules(db)).couponEnabled};
       else if(path==='/auth/wechat/bind'&&method==='POST')result=await service.bindWechat(user,b.code);
-      else if(parts[0]==='orders'&&parts.length===3&&parts[2]==='wechat-pay'&&method==='POST')result=await service.prepay(user,parts[1],b.paymentChoice);
+      else if(parts[0]==='orders'&&parts.length===3&&parts[2]==='wechat-pay'&&method==='POST')result=await service.prepay(user,parts[1],b.paymentChoice,b.changeId);
       else if(parts[0]==='payments'&&parts.length===3&&parts[2]==='status'&&method==='POST')result=await service.paymentStatus(user,parts[1]);
       else if(path==='/chef/wallet'&&method==='GET')result=await service.wallet(user);
       else if(path==='/chef/payout-profile'&&method==='POST')result=await service.payoutProfile(user,b);
@@ -101,17 +103,22 @@ class ApiController {
       return res.header('cache-control','no-store').send(result);
     }catch(e:any){
       const err=e instanceof ApiError?e:new ApiError(500,'INTERNAL_ERROR','服务暂时不可用');
-      if(!(e instanceof ApiError))console.error(e.code??e.name,e.message);
-      return res.status(err.status).send({error:{code:err.code,message:err.message}});
+      log(err.status>=500?'error':'warn','api.request.failed',{service:'api',requestId:req.id,method:req.method,route:logRoute(path),statusCode:err.status,...safeError(e)});
+      return res.status(err.status).send({error:{code:err.code,message:err.message,requestId:req.id}});
     }
   }
 }
 @Module({controllers:[ApiController]})class AppModule{}
 async function main(){
+  service=new ChefFinanceService(db);
   if(!['sandbox','business'].includes(process.env.APP_MODE??''))throw new Error('APP_MODE must be business or sandbox.');
   if(process.env.NODE_ENV==='production'&&process.env.APP_MODE==='sandbox')throw new Error('Simulated payments are not allowed in production.');
   if(!/^[a-f0-9]{64}$/i.test(process.env.DATA_KEY??''))throw new Error('Set a 32-byte DATA_KEY (64 hex characters).');
-  const app=await NestFactory.create<NestFastifyApplication>(AppModule,new FastifyAdapter({bodyLimit:4500000,trustProxy:process.env.TRUST_LOCAL_PROXY==='true'?['127.0.0.1','::1']:false}),{rawBody:true});
+  const app=await NestFactory.create<NestFastifyApplication>(AppModule,new FastifyAdapter({bodyLimit:4500000,trustProxy:process.env.TRUST_LOCAL_PROXY==='true'?['127.0.0.1','::1']:false}),{rawBody:true,logger:false});
+  const server=app.getHttpAdapter().getInstance();
+  server.addHook('onRequest',(req:any,res:any,done:any)=>{req.startedAt=performance.now();req.id=randomUUID();res.header('x-request-id',req.id);logContext.run({service:'api',requestId:req.id},done);});
+  server.addHook('onResponse',(req:any,res:any,done:any)=>{log(res.statusCode>=500?'error':res.statusCode>=400?'warn':'info','http.completed',{service:'api',requestId:req.id,method:req.method,route:logRoute(req.url),statusCode:res.statusCode,durationMs:Math.round(performance.now()-req.startedAt)});done();});
+  server.addHook('onError',(req:any,_res:any,error:any,done:any)=>{log('error','http.framework_error',{service:'api',requestId:req.id,...safeError(error)});done();});
   app.enableCors({origin:process.env.WEB_ORIGIN??'http://localhost:5173',methods:['GET','POST','DELETE'],allowedHeaders:['content-type','authorization']});
   app.enableShutdownHooks();
   await app.listen(Number(process.env.PORT??3000),process.env.HOST??'127.0.0.1');
@@ -119,4 +126,4 @@ async function main(){
   const stop=async()=>{await app.close();await db.$disconnect();};
   process.once('SIGTERM',()=>void stop());process.once('SIGINT',()=>void stop());
 }
-void main().catch(e=>{console.error(e.message);process.exitCode=1;});
+void main().catch(e=>{log('error','api.start_failed',{service:'api',...safeError(e)});process.exitCode=1;});

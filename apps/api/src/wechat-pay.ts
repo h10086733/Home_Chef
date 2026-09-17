@@ -1,3 +1,4 @@
+import {log,logRoute,safeError} from '@home-chef/infrastructure';
 import {publicEncrypt,constants,createDecipheriv,createPrivateKey,createPublicKey,randomBytes,sign,verify} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {ApiError,ensure} from './errors';
@@ -20,6 +21,9 @@ export class WechatPay{
   ensure(verify('RSA-SHA256',Buffer.from(`${t}\n${n}\n${body}\n`),this.config.publicKey,Buffer.from(s,'base64')),'WECHAT_SIGNATURE','微信签名无效',401);
  }
  async request(method:string,path:string,data?:unknown):Promise<any>{
+  const started=performance.now();try{const result=await this.requestSigned(method,path,data);log('info','wechat.request.completed',{method,route:logRoute(path),durationMs:Math.round(performance.now()-started)});return result;}catch(e){log('warn','wechat.request.failed',{method,route:logRoute(path),durationMs:Math.round(performance.now()-started),...safeError(e)});throw e;}
+ }
+ private async requestSigned(method:string,path:string,data?:unknown):Promise<any>{
   const body=data===undefined?'':JSON.stringify(data),t=String(Math.floor(this.now()/1000)),n=randomBytes(16).toString('hex');
   const s=this.signature(`${method}\n${path}\n${t}\n${n}\n${body}\n`);
   const authorization=`WECHATPAY2-SHA256-RSA2048 mchid="${this.config.mchId}",nonce_str="${n}",timestamp="${t}",serial_no="${this.config.serial}",signature="${s}"`;

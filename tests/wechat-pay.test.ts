@@ -50,7 +50,7 @@ test('WeChat APIv3 payment, isolated database and signed transport',async t=>{
  const strangerAuth=await svc.login({username:prefix+'x',password,displayName:'隔离权限测试'},true),stranger=await svc.session(strangerAuth.token);
  const address=await svc.address(user,{label:'隔离地址',regionCode:f.regionCode,latitude:28.194,longitude:112.961,coordinateSystem:'GCJ02',fullText:'支付自动化测试地址'});
  const created:string[]=[];t.after(async()=>{await db.bookingLock.deleteMany({where:{orderId:{in:created}}});await db.order.updateMany({where:{id:{in:created},contractStatus:{in:['PENDING_PAYMENT','PENDING_ACCEPTANCE']}},data:{contractStatus:'CANCELLED'}});});let index=0;
- const order=async()=>{const startsAt=new Date(Date.now()+(5+index++)*86400000);startsAt.setHours(18,0,0,0);const q=await svc.quote(user,{packageId:f.packages[0],addressId:address.id,startsAt:startsAt.toISOString(),guests:3,children:0,elders:0,allergens:'无',kitchen:'可用',cuisine:'湘菜',ingredientMode:'CUSTOMER',mode:'SELF',hours:2});const o=await svc.submitQuote(user,q.id);created.push(o.id);return o;};
+ const order=async(ingredientMode='CUSTOMER')=>{const startsAt=new Date(Date.now()+(5+index++)*86400000);startsAt.setHours(18,0,0,0);const q=await svc.quote(user,{packageId:f.packages[0],addressId:address.id,startsAt:startsAt.toISOString(),guests:3,children:0,elders:0,allergens:'无',kitchen:'可用',cuisine:'湘菜',ingredientMode,ingredientFen:10000,mode:'SELF',hours:2});const o=await svc.submitQuote(user,q.id);created.push(o.id);return o;};
  await t.test('missing configuration blocks payments; binding is unique and does not expose session keys',async()=>{
   const disabled=new PaymentService(db,()=>new Date(),null);await assert.rejects(()=>disabled.prepay(user,'missing','DEPOSIT'),/尚未开通/);
   assert.deepEqual(await svc.bindWechat(user,'code'),{bound:true});await assert.rejects(()=>svc.bindWechat(stranger,'code'),/已绑定其他账号/);
@@ -77,14 +77,15 @@ test('WeChat APIv3 payment, isolated database and signed transport',async t=>{
  await t.test('actual HTTP endpoint verifies unmodified raw body before authentication and rejects tampering',async()=>{
   const dir=await mkdtemp(resolve('.data/wx-http-')),keyPath=resolve(dir,'merchant.pem'),publicPath=resolve(dir,'public.pem');await writeFile(keyPath,config.privateKey,{mode:0o600});await writeFile(publicPath,config.publicKey);
   const server=createServer();await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));const port=(server.address() as any).port;await new Promise<void>(r=>server.close(()=>r()));
-  const child=spawn(process.execPath,['--import','tsx','src/main.ts'],{cwd:resolve('apps/api'),env:{...process.env,PORT:String(port),HOST:'127.0.0.1',WECHAT_PAY_ENABLED:'true',WECHAT_APP_ID:config.appId,WECHAT_APP_SECRET:config.appSecret,WECHAT_MCH_ID:config.mchId,WECHAT_MCH_SERIAL:config.serial,WECHAT_MCH_PRIVATE_KEY_PATH:keyPath,WECHAT_API_V3_KEY:config.apiKey,WECHAT_PAY_PUBLIC_KEY_ID:config.publicKeyId,WECHAT_PAY_PUBLIC_KEY_PATH:publicPath,WECHAT_PAY_NOTIFY_URL:config.notifyUrl},stdio:'ignore'});
+  const child=spawn(process.execPath,['--import','tsx','src/main.ts'],{cwd:resolve('apps/api'),env:{...process.env,PORT:String(port),HOST:'127.0.0.1',WECHAT_PAY_ENABLED:'true',WECHAT_APP_ID:config.appId,WECHAT_APP_SECRET:config.appSecret,WECHAT_MCH_ID:config.mchId,WECHAT_MCH_SERIAL:config.serial,WECHAT_MCH_PRIVATE_KEY_PATH:keyPath,WECHAT_API_V3_KEY:config.apiKey,WECHAT_PAY_PUBLIC_KEY_ID:config.publicKeyId,WECHAT_PAY_PUBLIC_KEY_PATH:publicPath,WECHAT_PAY_NOTIFY_URL:config.notifyUrl},stdio:['ignore','pipe','pipe']});
+  let serverLogs='';child.stdout?.on('data',b=>{serverLogs+=b.toString();});child.stderr?.on('data',b=>{serverLogs+=b.toString();});
   try{
    let ready=false;for(let i=0;i<60;i++){try{if((await fetch(`http://127.0.0.1:${port}/health`)).ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,100));}assert(ready,'HTTP API starts');
    const n=notification(trades.get(p.paymentId)),raw=n.raw+'\n',headers={...signed(raw),'Content-Type':'application/json'};
-   const ok=await fetch(`http://127.0.0.1:${port}/api/payments/wechat/notify`,{method:'POST',headers,body:raw});assert.equal(ok.status,204);
+   const ok=await fetch(`http://127.0.0.1:${port}/api/payments/wechat/notify`,{method:'POST',headers,body:raw});assert.equal(ok.status,204);assert.match(ok.headers.get('x-request-id')??'',/^[a-f0-9-]{36}$/);
    const invalid=await fetch(`http://127.0.0.1:${port}/api/payments/wechat/notify`,{method:'POST',headers,body:n.raw});assert.equal(invalid.status,401);
    assert.equal(await db.ledgerEntry.count({where:{orderId:o.id,kind:'PAYMENT'}}),1);
-  }finally{if(child.exitCode===null&&child.signalCode===null){const exited=new Promise<void>(r=>child.once('exit',()=>r()));child.kill('SIGTERM');await exited;}await rm(dir,{recursive:true,force:true});}
+  }finally{if(child.exitCode===null&&child.signalCode===null){const exited=new Promise<void>(r=>child.once('exit',()=>r()));child.kill('SIGTERM');await exited;}await rm(dir,{recursive:true,force:true});assert(serverLogs.includes('http.completed'));assert(serverLogs.includes('api.request.failed'));assert(!serverLogs.includes(config.apiKey));assert(!serverLogs.includes('BEGIN PRIVATE KEY'));assert(!serverLogs.includes('ciphertext'));assert(!serverLogs.includes('wechatpay-signature'));}
  });
  await t.test('cancellation queues refund, accepted refund is not booked until confirmed; duplicate result is harmless',async()=>{
   await svc.cancel(user,o.id,{reason:'测试退款'});const r=await db.paymentRequest.findFirstOrThrow({where:{orderId:o.id,kind:'REFUND'}});assert.equal((await svc.getOrder(user,o.id)).refundedFen,0);
@@ -109,6 +110,36 @@ test('WeChat APIv3 payment, isolated database and signed transport',async t=>{
   const state=await svc.getOrder(user,o.id);assert.equal(state.contractStatus,'PENDING_ACCEPTANCE');assert.equal(state.balanceFen,o.totalFen-p.amountFen);assert.equal(await db.chefOrder.count({where:{orderId:o.id}}),1);
   const r=await db.paymentRequest.findFirstOrThrow({where:{orderId:o.id,kind:'REFUND'}});await svc.reconcileRefund(r);refunds.get(r.id).status='SUCCESS';await svc.reconcileRefund(r);
   assert.equal((await svc.getOrder(user,o.id)).receivedFen-(await svc.getOrder(user,o.id)).refundedFen,p.amountFen);await svc.cancel(user,o.id,{reason:'测试清理'});
+ });
+ const budgetOrder=async()=>{
+  const o=await order('CHEF'),p=await svc.prepay(user,o.id,'DEPOSIT');trades.get(p.paymentId).trade_state='SUCCESS';await svc.paymentStatus(user,p.paymentId);
+  const chef=await db.chef.findUniqueOrThrow({where:{id:f.chefs[0]}}),chefUser=await db.user.findUniqueOrThrow({where:{id:chef.userId}});
+  await db.order.update({where:{id:o.id},data:{contractStatus:'ACCEPTED',fulfillmentStatus:'READY',acceptedChefId:chef.id}});
+  const proposed=await svc.change(chefUser,o.id,{action:'propose',kind:'BUDGET',ingredientFen:12500,reason:'增加采购食材'});
+  return {o:await svc.getOrder(user,o.id),changeId:proposed.details.pendingChange.id,chefUser};
+ };
+ await t.test('additional payment uses server proposal, reuses one bill and updates budget only after signed success',async()=>{
+  const {o,changeId,chefUser}=await budgetOrder();await assert.rejects(()=>svc.prepay(chefUser,o.id,'ADDITIONAL',changeId));await assert.rejects(()=>svc.prepay(user,o.id,'ADDITIONAL','stale'));
+  await assert.rejects(()=>svc.change(user,o.id,{action:'accept',changeId}),/小程序/);
+  const [a,b]=await Promise.all([svc.prepay(user,o.id,'ADDITIONAL',changeId),svc.prepay(user,o.id,'ADDITIONAL',changeId)]);assert.equal(a.paymentId,b.paymentId);assert.equal(a.amountFen,2500);
+  const unpaid=await svc.getOrder(user,o.id);assert.equal(unpaid.totalFen,o.totalFen);assert.equal(unpaid.details.ingredientFen,10000);assert.equal(unpaid.receivedFen,o.receivedFen);
+  const n=notification({...trades.get(a.paymentId),trade_state:'SUCCESS'});await Promise.all([svc.paymentNotification(n.headers,n.raw),svc.paymentNotification(n.headers,n.raw)]);
+  const paid=await svc.getOrder(user,o.id);assert.equal(paid.totalFen,o.totalFen+2500);assert.equal(paid.receivedFen,o.receivedFen+2500);assert.equal(paid.balanceFen,o.balanceFen);assert.equal(paid.details.ingredientFen,12500);assert.equal(paid.details.pendingChange,null);assert.equal(paid.contractStatus,'ACCEPTED');assert.equal(await db.ledgerEntry.count({where:{reference:a.paymentId}}),1);
+ });
+ await t.test('expired additional bill can be retried; late duplicate capture cannot apply budget twice',async()=>{
+  const {o,changeId}=await budgetOrder(),first=await svc.prepay(user,o.id,'ADDITIONAL',changeId),request=await db.paymentRequest.findUniqueOrThrow({where:{id:first.paymentId}});
+  await db.paymentRequest.update({where:{id:first.paymentId},data:{rawEvent:{...(request.rawEvent as any),expiresAt:new Date(Date.now()-1000).toISOString()}}});await svc.paymentStatus(user,first.paymentId);
+  const second=await svc.prepay(user,o.id,'ADDITIONAL',changeId);assert.notEqual(first.paymentId,second.paymentId);trades.get(second.paymentId).trade_state='SUCCESS';await svc.paymentStatus(user,second.paymentId);
+  const n=notification({...trades.get(first.paymentId),trade_state:'SUCCESS'});await svc.paymentNotification(n.headers,n.raw);
+  const final=await svc.getOrder(user,o.id);assert.equal(final.totalFen,o.totalFen+2500);assert.equal(final.balanceFen,o.balanceFen);assert.equal(final.details.ingredientFen,12500);assert.equal(await db.paymentRequest.count({where:{orderId:o.id,kind:'REFUND',amountFen:2500}}),1);
+ });
+ await t.test('rejected budget closes unpaid WeChat bill without changing the original order',async()=>{
+  const {o,changeId}=await budgetOrder(),p=await svc.prepay(user,o.id,'ADDITIONAL',changeId);await svc.change(user,o.id,{action:'reject',changeId});await svc.paymentStatus(user,p.paymentId);assert.equal(trades.get(p.paymentId).trade_state,'CLOSED');const fresh=await svc.getOrder(user,o.id);assert.equal(fresh.totalFen,o.totalFen);assert.equal(fresh.receivedFen,o.receivedFen);
+ });
+ await t.test('late additional capture after rejection refunds only that capture and preserves booking and balance',async()=>{
+  const {o,changeId}=await budgetOrder(),p=await svc.prepay(user,o.id,'ADDITIONAL',changeId);await svc.change(user,o.id,{action:'reject',changeId});trades.get(p.paymentId).trade_state='SUCCESS';await svc.paymentStatus(user,p.paymentId);
+  assert.equal((await svc.paymentStatus(user,p.paymentId)).refundRequired,true);const fresh=await svc.getOrder(user,o.id);assert.equal(fresh.totalFen,o.totalFen);assert.equal(fresh.details.ingredientFen,10000);assert.equal(fresh.balanceFen,o.balanceFen);assert.equal(fresh.contractStatus,'ACCEPTED');const refund=await db.paymentRequest.findFirstOrThrow({where:{orderId:o.id,kind:'REFUND'}});assert.equal(refund.amountFen,2500);assert.equal((refund.rawEvent as any).paymentId,p.paymentId);
+  await svc.reconcileRefund(refund);refunds.get(refund.id).status='SUCCESS';await svc.reconcileRefund(refund);const done=await svc.getOrder(user,o.id);assert.equal(done.receivedFen-done.refundedFen,o.receivedFen);
  });
  await t.test('balance uses confirmed database amount and settles only after signed payment',async()=>{
   const o=await order(),p=await svc.prepay(user,o.id,'DEPOSIT');trades.get(p.paymentId).trade_state='SUCCESS';await svc.paymentStatus(user,p.paymentId);

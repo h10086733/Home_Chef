@@ -1,3 +1,4 @@
+import {logContext} from '@home-chef/infrastructure';
 import { PrismaClient, Prisma, User, Order } from '@prisma/client';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { ApiError, ensure, text, integer } from './errors';
@@ -20,7 +21,7 @@ export class Service {
   }
   role(user: User, ...roles: string[]) { ensure(user.roles.some(r => roles.includes(r)), 'FORBIDDEN', '当前账号无权执行此操作', 403); }
   async audit(tx: Tx, actorId: string | null, action: string, id: string, after: Data = {}) {
-    await tx.auditEvent.create({ data: { actorId, action, aggregateType: 'MVP', aggregateId: id, after: after as Prisma.InputJsonValue, traceId: randomUUID() } });
+    await tx.auditEvent.create({ data: { actorId, action, aggregateType: 'MVP', aggregateId: id, after: after as Prisma.InputJsonValue, traceId: typeof logContext.getStore()?.requestId==='string'?String(logContext.getStore()!.requestId):randomUUID() } });
   }
   async event(tx: Tx, name: string, order: Order, recipients: string[] = []) {
     await tx.outboxEvent.create({ data: { eventType: name, aggregateType: 'Order', aggregateId: order.id, payload: { recipients: [...new Set([order.customerId, ...recipients])], body: name, ruleVersion: obj(order.ruleSnapshot).id } } });

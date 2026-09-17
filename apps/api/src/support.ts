@@ -53,6 +53,7 @@ export class MvpService extends Service {
           data.details={...data.details,startsAt:pending.startsAt,endsAt:pending.endsAt,earlyAddressConsent:false};
         }else if(pending.kind==='BUDGET'){
           ensure(customer,'FORBIDDEN','采购增量须用户确认支付',403);
+          ensure(process.env.APP_MODE==='sandbox','WECHAT_PAYMENT_REQUIRED','请在微信小程序确认并支付采购补款，到账后预算才会生效');
           await this.payment(tx,o,pending.additionalFen,'ADDITIONAL','change:'+pending.id);
           data={...data,totalFen:o.totalFen+pending.additionalFen,receivedFen:o.receivedFen+pending.additionalFen,details:{...data.details,ingredientFen:pending.ingredientFen}};
         }else data.details={...data.details,menu:pending.menu};

@@ -11,6 +11,9 @@ ExecStart=/usr/bin/node --env-file=/srv/home-chef/.env apps/api/dist/main.js
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=75
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=home-chef-api
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

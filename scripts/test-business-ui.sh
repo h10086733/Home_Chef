@@ -2,7 +2,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p .data
-if curl -fsS http://127.0.0.1:3001/health >/dev/null 2>&1;then echo 'Port 3001 is in use; stop the previous isolated test API before running this test.';exit 1;fi
+bash scripts/start-check-frontends.sh
+if curl --max-time 2 -fsS http://127.0.0.1:3001/health >/dev/null 2>&1;then echo 'Port 3001 is in use; stop the previous isolated test API before running this test.';exit 1;fi
 set -a;source .env;set +a
 export APP_MODE=business
 export DATABASE_URL=postgresql://home_chef:home_chef@localhost:55432/home_chef_test
@@ -13,8 +14,12 @@ bash scripts/pnpm.sh exec tsx --test tests/business.test.ts
 bash scripts/run-business-test-api.sh >.data/business-test-api.log 2>&1 &
 taskApiPid=$!
 trap 'kill -TERM "$taskApiPid" 2>/dev/null || true' EXIT
+taskApiReady=false
 for taskAttempt in {1..30};do
- if curl -fsS http://127.0.0.1:3001/health >/dev/null 2>&1;then break;fi
+ if curl --max-time 2 -fsS http://127.0.0.1:3001/health >/dev/null 2>&1;then taskApiReady=true;break;fi
  sleep .5
 done
-node tests/business-browser.mjs
+if [[ "$taskApiReady" != true ]];then echo "Isolated test API failed to start; inspect .data/business-test-api.log";exit 1;fi
+if [[ "${1:-}" != "--maps-only" ]];then node tests/business-browser.mjs;fi
+
+MAP_TEST_ISOLATED=true node tests/maps-browser.mjs

@@ -1,0 +1,13 @@
+import {AsyncLocalStorage} from 'node:async_hooks';
+type Fields=Record<string,unknown>;
+export const logContext=new AsyncLocalStorage<Fields>();
+const allowed=new Set(['service','requestId','parentRequestId','userId','orderId','paymentId','jobId','attempt','method','route','statusCode','durationMs','errorCode','errorType','frames','kind','count','expired','confirmed','published','port','mode']);
+// Values are identifiers, numeric measurements or static route templates only. Never pass payloads.
+export function logRecord(level:'info'|'warn'|'error',event:string,fields:Fields={}):Fields{
+ const safe:Fields={};for(const [key,value] of Object.entries({...logContext.getStore(),...fields}))if(allowed.has(key)&&(typeof value==='string'||typeof value==='number'||typeof value==='boolean'))safe[key]=typeof value==='string'?value.slice(0,500):value;
+ return {time:new Date().toISOString(),level,event,...safe};
+}
+export function log(level:'info'|'warn'|'error',event:string,fields:Fields={}){const line=JSON.stringify(logRecord(level,event,fields));if(level==='error')console.error(line);else if(level==='warn')console.warn(line);else console.log(line);}
+export function safeError(error:unknown){const e=error as {name?:unknown,code?:unknown,stack?:unknown};return {errorType:typeof e?.name==='string'?e.name.replace(/[^a-zA-Z0-9_]/g,'').slice(0,60):'UnknownError',errorCode:typeof e?.code==='string'?e.code.replace(/[^a-zA-Z0-9_]/g,'').slice(0,80):'UNEXPECTED',frames:typeof e?.stack==='string'?e.stack.split('\n').slice(1).filter(s=>/^\s+at .+:\d+:\d+\)?$/.test(s)).slice(0,5).map(s=>s.replace(/\([^)]*\)/g,'(...)')).join(' | '):''};}
+const routes=new Set('v3 transactions jsapi out-trade-no close refund domestic refunds fund-app mch-transfer transfer-bills out-bill-no profitsharing receivers add unfreeze api auth login register logout me runtime health internal tick maps config orders quotes submit pay cancel wechat-pay payments status wechat notify chef transfers wallet payout-profile withdrawals profile packages schedules chefs reviews favorites coupons addresses accept fulfill changes confirm confirm-fees balance address-consent tickets messages insurance-claim notifications files ops dashboard finance finance-roles settlements rules audit ledger'.split(' '));
+export function logRoute(path:string){return path.split('?')[0].split('/').map(s=>routes.has(s)?s:s?':id':'').join('/').slice(0,250);}

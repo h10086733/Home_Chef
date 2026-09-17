@@ -11,6 +11,9 @@ ExecStart=/usr/bin/node --env-file=/srv/home-chef/.env apps/worker/dist/main.js
 Restart=always
 RestartSec=5
 TimeoutStopSec=75
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=home-chef-worker
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

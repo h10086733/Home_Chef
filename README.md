@@ -52,9 +52,12 @@ bash scripts/pnpm.sh --filter @home-chef/miniapp build:h5
 bash scripts/test-integration.sh
 bash scripts/pnpm.sh test:ui
 ```
-test:ui 需要网页 5173 和 H5 10086 运行，会创建/使用独立 home_chef_test 数据库，并临时启动 3001 测试 API；退出后停止该 API。它不在业务库里创建测试数据。
+test:ui 会检查并启动网页 5173 和 H5 10086，会创建/使用独立 home_chef_test 数据库，并临时启动 3001 测试 API；退出后停止该 API。它不在业务库里创建测试数据。
+test:maps 使用同一隔离入口单独运行地图与动态片区验收。
 测试覆盖两端注册、重新登录、搜索、菜系和排序、收藏增删、连续详情与锚点、订单提交、详情、下拉刷新和不同用户数据隔离。
 历史模拟支付回归只在隔离测试环境执行。db:seed 默认只初始化业务规则；db:seed:demo 是显式历史测试工具，不能在 business 模式运行。
 
 本轮实施与验收：[真实业务清理记录](docs/business-cleanup.md)。
 原需求和历史实现记录仍保留在 docs 中；旧文档中的演示账号、模拟付款或试运营描述不代表当前环境。
+
+日志字段、排查方式及完整验收边界见 [日志与功能验收](docs/logging-and-acceptance.md)。
