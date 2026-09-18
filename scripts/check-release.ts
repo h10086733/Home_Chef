@@ -19,6 +19,7 @@ check('小程序正式 API 地址（/api，无尾斜杠）',api?.pathname==='/ap
 check('网页正式 HTTPS 来源',web?.pathname==='/');
 check('腾讯地图配置',process.env.TENCENT_MAP_BROWSER_KEY&&process.env.TENCENT_MAP_REFERER);
 check('真实微信 AppID',/^wx[a-f0-9]{16}$/i.test(process.env.WECHAT_APP_ID??''));
+check('微信手机号登录开关及 AppSecret',process.env.WECHAT_LOGIN_ENABLED==='true'&&!!process.env.WECHAT_APP_SECRET?.trim());
 check('真实微信支付已启用',process.env.WECHAT_PAY_ENABLED==='true');
 const db=new PrismaClient();
 try{

@@ -68,6 +68,8 @@ model User {
   id           String   @id @default(cuid())
   openId       String?  @unique
   phone        String?  @unique
+  phoneEncrypted String?
+  phoneVerifiedAt DateTime?
   displayName  String?
   roles        UserRole[] @default([])
   createdAt    DateTime @default(now())

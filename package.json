@@ -22,6 +22,7 @@
     "dev:miniapp": "pnpm --filter @home-chef/miniapp dev:weapp",
     "test:maps": "bash scripts/test-business-ui.sh --maps-only",
     "test:ui": "bash scripts/test-business-ui.sh",
+    "test:auth": "bash scripts/test-wechat-auth.sh",
     "test:wechat": "bash scripts/test-wechat-pay.sh"
   },
   "devDependencies": {

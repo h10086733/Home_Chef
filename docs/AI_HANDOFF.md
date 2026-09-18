@@ -1,6 +1,6 @@
 # AI 接手指南
 
-更新时间：2026-09-17。先读 [当前状态](CURRENT_STATUS.md)，再按任务定位源文件。不要依赖上一段聊天中的运行状态。
+更新时间：2026-09-18。先读 [当前状态](CURRENT_STATUS.md)，再按任务定位源文件。不要依赖上一段聊天中的运行状态。
 
 ## 5 分钟接手
 
@@ -58,6 +58,7 @@ bash scripts/pnpm.sh db:migrate
 | HTTP、认证路由、错误/请求日志 | apps/api/src/main.ts |
 | 注册、报价、订单、履约、定时处理 | apps/api/src/service.ts |
 | 入驻审核、套餐、改约、售后、文件、评价 | apps/api/src/support.ts |
+| 微信手机号登录、UID/手机号绑定 | apps/api/src/wechat-auth.ts；详见 wechat-login.md |
 | 用户支付/退款/采购补款/查单 | apps/api/src/payments.ts |
 | 结算、余额、提现、分账、财务权限 | apps/api/src/chef-finance.ts |
 | 微信 APIv3 签名/验签/解密/OpenID | apps/api/src/wechat-pay.ts |
@@ -91,6 +92,7 @@ bash scripts/pnpm.sh db:migrate
 ```bash
 bash scripts/pnpm.sh typecheck
 bash scripts/pnpm.sh test
+bash scripts/pnpm.sh test:auth
 bash scripts/pnpm.sh test:wechat
 bash scripts/pnpm.sh test:integration
 bash scripts/pnpm.sh test:ui

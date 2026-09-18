@@ -1,0 +1,1 @@
+ALTER TABLE "User" ADD COLUMN "phoneEncrypted" TEXT, ADD COLUMN "phoneVerifiedAt" TIMESTAMP(3);

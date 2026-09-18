@@ -49,7 +49,7 @@ export class Service {
     await this.db.appSession.create({ data: { id: digest(token), userId: user!.id, expiresAt: new Date(this.clock().getTime() + 24 * HOUR) } });
     return { token, user: this.publicUser(user!) };
   }
-  publicUser(user: User) { return { id: user.id, displayName: user.displayName, roles: user.roles, username: user.username }; }
+  publicUser(user: User) { return { id: user.id, displayName: user.displayName, roles: user.roles, username: user.username, phoneBound:!!user.phoneVerifiedAt }; }
   async logout(token: string) { await this.db.appSession.deleteMany({ where: { id: digest(token) } }); return { ok: true }; }
   async addresses(user: User) {
     const rows = await this.db.address.findMany({ where: { userId: user.id } });

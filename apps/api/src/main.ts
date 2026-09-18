@@ -1,3 +1,4 @@
+import {WechatIdentity,wechatPhoneLogin} from './wechat-auth';
 import {randomUUID} from 'node:crypto';
 import {log,logContext,logRoute,safeError} from '@home-chef/infrastructure';
 import 'reflect-metadata';
@@ -13,6 +14,7 @@ import { ApiError, ensure } from './errors';
 
 const db = new PrismaClient();
 let service:ChefFinanceService;
+const identity=new WechatIdentity();
 const attempts=new Map<string,{count:number,until:number}>();
 @Controller()
 class ApiController {
@@ -24,9 +26,10 @@ class ApiController {
     const parts=path.split('/').filter(Boolean),method=req.method,b=req.body??{};
     try{
       if(method==='GET'&&path==='/health'){await db.$queryRaw`SELECT 1`;return res.send({status:'ok',service:'home-chef',sandbox:process.env.APP_MODE==='sandbox'});}
-      if(method==='POST'&&['/auth/login','/auth/register'].includes(path)){
+      if(method==='POST'&&['/auth/login','/auth/register','/auth/wechat/phone-login'].includes(path)){
         const ip=req.ip,now=Date.now();if(attempts.size>10000)for(const[k,v]of attempts)if(v.until<now)attempts.delete(k);
         const v=attempts.get(ip);if(v&&v.until>now){ensure(v.count<30,'RATE_LIMIT','登录尝试过多，请15分钟后重试',429);v.count++;}else attempts.set(ip,{count:1,until:now+900000});
+        if(path==='/auth/wechat/phone-login'){const bearer=String(req.headers.authorization??'').replace(/^Bearer /,'');const existing=bearer?await service.session(bearer):undefined;return res.send(await wechatPhoneLogin(service,identity,b,existing));}
         return res.send(await service.login(b,path==='/auth/register'));
       }
       if(path==='/chef/transfers/notify'&&method==='POST'){ensure(Buffer.isBuffer(req.rawBody),'INVALID_BODY','缺少通知原文',400);await service.transferNotification(req.headers,req.rawBody.toString('utf8'));return res.status(204).send();}
