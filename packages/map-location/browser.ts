@@ -30,7 +30,8 @@ export function chooseBrowserLocation(config:MapConfig,initial?:MapPoint|null):P
   let selected:MapPoint|null=null;
   function finish(point:MapPoint|null){window.removeEventListener('message',message);document.removeEventListener('keydown',keyboard);overlay.remove();document.body.style.overflow=overflow;active=false;previous?.focus();resolve(point);}
   function message(event:MessageEvent){
-   if(event.origin!=='https://apis.map.qq.com'||event.source!==iframe.contentWindow)return;
+   // Tencent redirects the legacy picker URL to mapapi.qq.com. Trust only these exact HTTPS origins.
+   if(!['https://apis.map.qq.com','https://mapapi.qq.com'].includes(event.origin)||event.source!==iframe.contentWindow)return;
    const point=pointFromPicker(event.data);if(!point)return;selected=point;
    summary.textContent=point.name+' · '+point.address;confirm.disabled=false;confirm.style.opacity='1';
   }
