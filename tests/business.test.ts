@@ -39,6 +39,17 @@ test('Real-data business flow',async t=>{
   assert.equal((await svc.chefs({search:prefix,latitude:28.5,longitude:113.5})).length,0);
   assert.equal((await svc.chefs({search:prefix}))[0].rating,null);
  });
+ await t.test('discovery uses booking radius and excludes closed or different regions',async()=>{
+  const rule=await db.platformRule.findUniqueOrThrow({where:{id:prefix+'rules'}}),data=rule.data as any;
+  await db.chef.update({where:{id:chefs[0].id},data:{serviceRadiusM:10000}});
+  try{
+   assert.equal((await svc.chefs({search:prefix,latitude:28.24,longitude:112.961})).length,0);
+   assert.equal((await svc.chefs({search:prefix,latitude:28.194,longitude:112.961,regionCode:'other'})).length,0);
+   assert.equal((await svc.chefs({search:prefix,latitude:28.194,longitude:112.961,regionCode:prefix})).length,2);
+   await db.platformRule.update({where:{id:rule.id},data:{data:{...data,regions:data.regions.map((v:any)=>({...v,active:false}))}}});
+   assert.equal((await svc.chefs({search:prefix})).length,0);
+  }finally{await db.platformRule.update({where:{id:rule.id},data:{data}});await db.chef.update({where:{id:chefs[0].id},data:{serviceRadiusM:chefs[0].serviceRadiusM}});}
+ });
  await t.test('favorites persist across login and can be removed',async()=>{
   assert.equal((await svc.favorites(users[0],chefs[0].id) as any).favorite,true);
   const auth=await svc.login({username:users[0].username,password});assert.equal((await svc.favorites(await svc.session(auth.token)) as any[]).length,1);

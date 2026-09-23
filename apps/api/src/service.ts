@@ -80,9 +80,10 @@ export class Service {
     ensure(!located||(Number.isFinite(lat)&&Number.isFinite(lng)&&Math.abs(lat)<=90&&Math.abs(lng)<=180),'INVALID_LOCATION','位置无效',400);
     const sort=String(query.sort??'default');ensure(['default','price_asc','price_desc','distance'].includes(sort),'INVALID_SORT','排序方式无效',400);
     ensure(sort!=='distance'||located,'LOCATION_REQUIRED','请先选择位置',400);
+    const rules=await this.rules(this.db),regionCode=String(query.regionCode??'');
     const result=rows.map(c=>{const d=obj(c.data),r=ratings.find(v=>v.chefId===c.id),distanceM=located?this.distance(lat,lng,d.latitude,d.longitude):null;
-      return {id:c.id,name:c.user.displayName,status:c.status,healthValidUntil:c.healthValidUntil,serviceRadiusM:c.serviceRadiusM,cuisines:d.cuisines??[],bio:d.bio??'',regionCode:d.regionCode,packages:c.packages,rating:r?((r._avg.taste??0)+(r._avg.service??0)+(r._avg.punctuality??0))/3:null,reviewCount:r?._count._all??0,distanceM:Number.isFinite(distanceM)?distanceM:null};
-    }).filter(c=>(!cuisine||cuisine==='全部'||c.cuisines.includes(cuisine))&&(!search||[c.name,c.bio,...c.cuisines,...c.packages.map(p=>p.name+' '+p.description)].join(' ').toLocaleLowerCase().includes(search))&&(!located||(c.distanceM!==null&&c.distanceM<=c.serviceRadiusM)));
+      return {id:c.id,name:c.user.displayName,status:c.status,healthValidUntil:c.healthValidUntil,serviceRadiusM:rules.radiusM??c.serviceRadiusM,cuisines:d.cuisines??[],bio:d.bio??'',regionCode:d.regionCode,packages:c.packages,rating:r?((r._avg.taste??0)+(r._avg.service??0)+(r._avg.punctuality??0))/3:null,reviewCount:r?._count._all??0,distanceM:Number.isFinite(distanceM)?distanceM:null};
+    }).filter(c=>rules.regions.some((r:Data)=>r.active&&r.code===c.regionCode)&&(!regionCode||c.regionCode===regionCode)&&(!cuisine||cuisine==='全部'||c.cuisines.includes(cuisine))&&(!search||[c.name,c.bio,...c.cuisines,...c.packages.map(p=>p.name+' '+p.description)].join(' ').toLocaleLowerCase().includes(search))&&(!located||(c.distanceM!==null&&c.distanceM<=c.serviceRadiusM)));
     const price=(c:typeof result[number])=>c.packages.length?Math.min(...c.packages.map(p=>p.serviceFen)):Number.MAX_SAFE_INTEGER;
     result.sort((x,y)=>sort==='price_asc'?price(x)-price(y):sort==='price_desc'?price(y)-price(x):sort==='distance'?(x.distanceM??Infinity)-(y.distanceM??Infinity):x.id.localeCompare(y.id));
     return result;
@@ -174,7 +175,9 @@ export class Service {
         ensure(coupon?.userId === user.id && coupon.status === 'AVAILABLE' && coupon.expiresAt > this.clock() && coupon.regionCode === a.regionCode && pkg.serviceFen + ingredientFen >= coupon.minFen, 'COUPON_UNAVAILABLE', '优惠券不可用');
         details.couponId = coupon.id; details.discountFen = Math.min(coupon.amountFen, pkg.serviceFen); details.couponVersion = coupon.ruleVersion;
       }
-      ensure(await this.available(tx, pkg.chefId, details), 'CHEF_UNAVAILABLE', '厨师不在服务范围或档期不可用');
+      const provider=await tx.chef.findUnique({where:{id:pkg.chefId}}),providerData=obj(provider?.data);
+      ensure(provider&&providerData.regionCode===a.regionCode&&[providerData.latitude,providerData.longitude].every(Number.isFinite)&&this.distance(details.latitude,details.longitude,providerData.latitude,providerData.longitude)<=details.radiusM,'CHEF_OUT_OF_RANGE','该厨师不服务所选地址，请更换地址或厨师');
+      ensure(await this.available(tx, pkg.chefId, details), 'CHEF_UNAVAILABLE', '厨师在所选时间不可预约，请检查档期、服务时长或更换厨师');
       const totalFen = pkg.serviceFen + ingredientFen - details.discountFen, depositFen = Math.round(totalFen * .3);
       const q = await tx.quote.create({ data: { customerId: user.id, chefId: pkg.chefId, packageId: pkg.id, totalFen, depositFen, balanceFen: totalFen - depositFen, ruleVersion: rules.id, expiresAt: new Date(this.clock().getTime() + 30 * 60000), details } });
       if (details.mode === 'SELF') await tx.bookingLock.create({ data: { chefId: pkg.chefId, quoteId: q.id, startsAt: new Date(startsAt.getTime()-HOUR), endsAt: new Date(endsAt.getTime()+HOUR), expiresAt: q.expiresAt } });
