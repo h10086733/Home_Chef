@@ -15,7 +15,7 @@ import { ApiError, ensure } from './errors';
 const db = new PrismaClient();
 let service:ChefFinanceService;
 const identity=new WechatIdentity();
-const attempts=new Map<string,{count:number,until:number}>();
+
 @Controller()
 class ApiController {
   @Post('*') post(@Req() req:any,@Res() res:any) { return this.route(req,res); }
@@ -27,8 +27,6 @@ class ApiController {
     try{
       if(method==='GET'&&path==='/health'){await db.$queryRaw`SELECT 1`;return res.send({status:'ok',service:'home-chef',sandbox:process.env.APP_MODE==='sandbox'});}
       if(method==='POST'&&['/auth/login','/auth/register','/auth/wechat/phone-login'].includes(path)){
-        const ip=req.ip,now=Date.now();if(attempts.size>10000)for(const[k,v]of attempts)if(v.until<now)attempts.delete(k);
-        const v=attempts.get(ip);if(v&&v.until>now){ensure(v.count<30,'RATE_LIMIT','登录尝试过多，请15分钟后重试',429);v.count++;}else attempts.set(ip,{count:1,until:now+900000});
         if(path==='/auth/wechat/phone-login'){const bearer=String(req.headers.authorization??'').replace(/^Bearer /,'');const existing=bearer?await service.session(bearer):undefined;return res.send(await wechatPhoneLogin(service,identity,b,existing));}
         return res.send(await service.login(b,path==='/auth/register'));
       }
@@ -38,6 +36,8 @@ class ApiController {
         await service.paymentNotification(req.headers,req.rawBody.toString('utf8'));return res.status(204).send();
       }
       if(path==='/internal/tick'&&method==='POST'){ensure(process.env.INTERNAL_JOB_SECRET&&req.headers.authorization==='Bearer '+process.env.INTERNAL_JOB_SECRET,'FORBIDDEN','无权执行任务',403);return res.send(await service.tick());}
+      // Public discovery returns only the existing safe chef projection; private routes still require a session.
+      if(method==='GET'&&path==='/chefs')return res.send(await service.chefs(req.query));
       const token=String(req.headers.authorization??'').replace(/^Bearer /,'');
       const user=await service.session(token);const context=logContext.getStore();if(context)context.userId=user.id;
       let result:unknown;

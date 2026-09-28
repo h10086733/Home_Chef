@@ -10,6 +10,7 @@
     "release:check": "tsx scripts/check-release.ts",
     "db:backup": "node scripts/backup-db.mjs",
     "build": "turbo run build",
+    "build:server": "bash scripts/build-server.sh",
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
     "test": "turbo run test",

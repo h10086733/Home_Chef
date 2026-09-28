@@ -30,6 +30,13 @@ test('Real-data business flow',async t=>{
    await svc.saveSchedule(users[i+2],{startsAt:new Date(now.getTime()+86400000).toISOString(),endsAt:new Date(now.getTime()+20*86400000).toISOString()});chefs.push(chef);packages.push(pkg);
   }
  });
+ await t.test('schedule validation explains past, reversed, invalid and overlong times',async()=>{
+  const future=new Date(now.getTime()+86400000).toISOString();
+  await assert.rejects(()=>svc.saveSchedule(users[2],{startsAt:'invalid',endsAt:future}),/请选择有效/);
+  await assert.rejects(()=>svc.saveSchedule(users[2],{startsAt:new Date(now.getTime()-60000).toISOString(),endsAt:future}),/必须晚于当前时间/);
+  await assert.rejects(()=>svc.saveSchedule(users[2],{startsAt:future,endsAt:future}),/结束时间必须晚于开始时间/);
+  await assert.rejects(()=>svc.saveSchedule(users[2],{startsAt:future,endsAt:new Date(now.getTime()+33*86400000).toISOString()}),/不能超过31天/);
+ });
  await t.test('database search, cuisine, price and geographic filters change results',async()=>{
   assert.equal((await svc.chefs({search:prefix})).length,2);
   assert.deepEqual((await svc.chefs({search:prefix,cuisine:'湘菜'})).map(c=>c.id),[chefs[0].id]);

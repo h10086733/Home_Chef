@@ -130,7 +130,10 @@ export class Service {
     return this.transaction(async tx => {
       const c = await tx.chef.findUnique({ where: { userId: user.id } }); ensure(c, 'NOT_CHEF', '请先申请厨师');
       const startsAt = new Date(text(b.startsAt, '开始时间')), endsAt = new Date(text(b.endsAt, '结束时间'));
-      ensure(startsAt > this.clock() && endsAt > startsAt && endsAt.getTime() - startsAt.getTime() <= 31 * 24 * HOUR, 'INVALID_TIME', '档期时间无效', 400);
+      ensure(Number.isFinite(startsAt.getTime())&&Number.isFinite(endsAt.getTime()),'INVALID_TIME','请选择有效的档期开始和结束时间',400);
+      ensure(startsAt>this.clock(),'INVALID_TIME','档期开始时间必须晚于当前时间，请选择未来时间',400);
+      ensure(endsAt>startsAt,'INVALID_TIME','档期结束时间必须晚于开始时间',400);
+      ensure(endsAt.getTime()-startsAt.getTime()<=31*24*HOUR,'INVALID_TIME','单个档期不能超过31天，请分段添加',400);
       return tx.scheduleSlot.create({ data: { chefId: c.id, startsAt, endsAt } });
     });
   }

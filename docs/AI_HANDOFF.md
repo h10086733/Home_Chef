@@ -119,3 +119,34 @@ bash scripts/pnpm.sh build
 实际 AppID、支付商户绑定、证书/密钥、转账与分账权限、正式 HTTPS API、微信合法域名和定位权限。网页/H5不具备独立微信支付渠道。不要把本机 .env 或密钥提交、粘贴到对话。
 
 `release:check` 不会部署、不发起真实资金请求；deploy 中的 systemd/Nginx 文件是模板，需要实际服务器路径和证书，并完成启动、回调、队列、日志、备份验收。查看 [当前状态](CURRENT_STATUS.md) 获取未完成队列。
+## 服务端增量发布构建（2026-09-23）
+
+不要只运行 `--filter @home-chef/api build`：公共包通过dist/index.d.ts供API引用，拉取源码不会更新旧dist；Prisma生成客户端也不由tsc更新。否则会出现日志导出TS2305、User.phoneVerifiedAt TS2339。
+
+已有依赖环境运行 `bash scripts/pnpm.sh build:server`（等价于 `bash scripts/build-server.sh`）。该脚本先db:generate，再以pnpm递归拓扑顺序构建API、worker及其依赖，无Turbo缓存，不连接数据库进行迁移，不自动重启服务。锁文件变化时先执行 `bash scripts/pnpm.sh install --frozen-lockfile`。
+
+尚未拉取新脚本时可直接执行：
+
+```bash
+bash scripts/pnpm.sh db:generate
+bash scripts/pnpm.sh --filter '@home-chef/api...' --filter '@home-chef/worker...' -r run build
+```
+
+构建成功不代表数据库字段已部署。生产迁移前从当前服务器的.env加载DATABASE_URL，避免prisma.config.ts回退到默认历史库：
+
+```bash
+set -a
+source .env
+set +a
+bash scripts/pnpm.sh db:migrate
+```
+
+迁移成功后用实际进程管理器重启API和worker；项目systemd模板对应 `home-chef-api` 与 `home-chef-worker`。网页另行构建并发布apps/admin-web/dist。不要运行演示种子或重置数据库。
+
+本地build:server已验证Prisma生成及5个相关工作区包编译通过，未代替用户执行服务器迁移或重启。
+## 线上批量测试数据（2026-09-26）
+
+仅在用户明确授权线上批量写入时使用 node scripts/online-batch-test.mjs --execute；无参数仅预览。真实接口注册、待审测试申请及未支付订单，不修改审核/支付/档期规则。必须保留 .data/online-batch-20260926.json 供续跑，内含凭据，不可输出全文或提交。遇到429等待15分钟，不切换IP或绕过限流。当前仅完成10名待审厨师和4名客户，订单0。详情见 online-batch-test-data.md。
+工作台界面专项：网页开发服务启动后运行 node tests/chef-workbench-browser.mjs（仅访问127.0.0.1:5173，页面接口夹具，无业务库写入），覆盖手机/桌面补件回填和刷新不覆盖编辑。
+
+登录导航（2026-09-28）：GET /chefs在会话检查前返回现有公开投影；不要扩大为匿名读取地址/订单/审核。网页Discover通过onLogin触发登录、initialChef恢复预约；小程序guest状态可浏览公开列表，book保留厨师与套餐。test:ui已包含登录返回和私有地址401验证。前后端须一同发布，否则旧API会拒绝游客列表。

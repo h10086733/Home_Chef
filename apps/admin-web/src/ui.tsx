@@ -1,7 +1,7 @@
 import React,{useState}from'react';import{useQuery}from'@tanstack/react-query';import{Tag,Spin,Alert,Button}from'antd';import{api,labels,upload}from'./api';
 export type Run=(fn:()=>Promise<unknown>,success?:string)=>Promise<void>;
 export function useData(path:string,enabled=true){return useQuery({queryKey:[path],queryFn:()=>api(path),enabled});}
-export const status=(v:string)=><Tag color={['CANCELLED','DISPUTED','FROZEN'].includes(v)?'orange':'green'}>{labels[v]??v}</Tag>;
+export const status=(v:string)=><Tag color={['CANCELLED','DISPUTED','FROZEN','REJECTED','SUSPENDED'].includes(v)?'orange':v==='PENDING_REVIEW'?'gold':'green'}>{labels[v]??v}</Tag>;
 export const options=(list:string[])=>list.map(value=>({value,label:labels[value]??value}));
 export function Field({label,children}:{label:string,children:React.ReactNode}){return <label className="field"><span>{label}</span>{children}</label>;}
 export function QueryState({q}:{q:any}){return q.isLoading?<Spin/>:q.error?<Alert type="error" message={q.error.message} action={<Button onClick={()=>q.refetch()}>重试</Button>}/>:null;}
