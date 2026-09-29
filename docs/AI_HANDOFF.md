@@ -150,3 +150,5 @@ bash scripts/pnpm.sh db:migrate
 工作台界面专项：网页开发服务启动后运行 node tests/chef-workbench-browser.mjs（仅访问127.0.0.1:5173，页面接口夹具，无业务库写入），覆盖手机/桌面补件回填和刷新不覆盖编辑。
 
 登录导航（2026-09-28）：GET /chefs在会话检查前返回现有公开投影；不要扩大为匿名读取地址/订单/审核。网页Discover通过onLogin触发登录、initialChef恢复预约；小程序guest状态可浏览公开列表，book保留厨师与套餐。test:ui已包含登录返回和私有地址401验证。前后端须一同发布，否则旧API会拒绝游客列表。
+
+微信预览包诊断：node scripts/check-wechat-preview.mjs；scripts/build-wechat.sh在正式构建后自动执行。游客AppID、回环API或缺少本次登录返回提示会失败；修配置后重建并重新扫码。

@@ -49,3 +49,12 @@ bash scripts/pnpm.sh test:auth 在 home_chef_test_wechat 隔离库使用受控�
 真机验收：新用户授权→再次登录UID相同→拒绝授权不登录→旧账号登录后绑定→角色/订单保留→冲突账号被拒绝。必须检查微信后台能力及调用额度；本次没有开通外部权限。
 
 接口参考：[手机号组件](https://developers.weixin.qq.com/miniprogram/dev/framework/open-ability/getPhoneNumber.html)、[服务端手机号接口](https://developers.weixin.qq.com/miniprogram/dev/OpenApiDoc/user-info/phone-number/getPhoneNumber.html)。本次工具未能抓取官方页面，发布前应在微信后台按当前官方文档核对并完成真机联调。
+## 真机预览加载旧登录页（2026-09-29）
+
+- 网页发布或服务器git pull不会自动更新微信手机上的预览包。更新小程序构建后，需要在开发者工具重新编译、重新预览/真机调试并扫描新的码。
+- 导入 apps/miniapp 时 miniprogramRoot 为 dist/；导入 apps/miniapp/dist 时其 project.config.json 的 miniprogramRoot 为 ./。先核对实际导入目录。
+- 本机普通 build 默认是游客AppID、本机API。不能把“编译通过”等同于正式手机号登录可用。需本机配置真实 WECHAT_APP_ID 与正式 TARO_APP_API_BASE，再运行 bash scripts/build-wechat.sh；服务端配置 WECHAT_LOGIN_ENABLED/WECHAT_APP_SECRET 与微信平台能力。
+- 登录页显示“版本”构建标识，用于核对手机包是否更新。构建版本可用 BUILD_LABEL 设置，不含配置秘密。
+- 微信网络失败对象的errMsg现转为中文Error，手机号授权拒绝/失败显示明确弹窗；不能用这些提示代替真实微信能力配置。
+
+正式构建现自动运行 node scripts/check-wechat-preview.mjs；也可单独运行检查旧产物。此检查不读取AppSecret，不调用微信，不代替真实授权验收。检查失败须先修正配置与重建，不应跳过后把游客包用于手机号验收。
