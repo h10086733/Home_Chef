@@ -40,4 +40,4 @@ function App(){
  {tab==='rules'&&<Rules run={run}/>}
  </main><footer>厨临门 HOME CHEF · 长沙本地上门私厨<br/><small>家常手艺，认真服务每一餐</small></footer></>;
 }
-createRoot(document.getElementById('root')!).render(<React.StrictMode><QueryClientProvider client={qc}><ConfigProvider button={{autoInsertSpace:false}} theme={{token:{colorPrimary:'#244b38',borderRadius:10,fontFamily:'Inter, PingFang SC, Microsoft YaHei, sans-serif'}}}><App/></ConfigProvider></QueryClientProvider></React.StrictMode>);
+createRoot(document.getElementById('root')!).render(<React.StrictMode><QueryClientProvider client={qc}><ConfigProvider button={{autoInsertSpace:false}} theme={{token:{colorPrimary:'#214f3a',colorInfo:'#214f3a',colorLink:'#214f3a',colorError:'#bd6044',borderRadius:10,fontFamily:'Inter, Noto Sans SC, PingFang SC, Microsoft YaHei, sans-serif'}}}><App/></ConfigProvider></QueryClientProvider></React.StrictMode>);
