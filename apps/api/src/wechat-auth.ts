@@ -43,6 +43,7 @@ export async function wechatPhoneLogin(service:Service,identity:WechatIdentity,b
   ensure(!byPhone||user?.id===byPhone.id,'PHONE_BOUND','该手机号已绑定其他账号，请先登录原账号绑定微信',409);
   ensure(!user?.openId||user.openId===verified.openId,'WECHAT_BOUND','当前账号已绑定其他微信',409);
   ensure(!user?.phone||user.phone===lookup||user.id===byPhone?.id,'PHONE_CHANGE_REQUIRED','此账号已绑定其他手机号，请联系平台处理换绑',409);
+  ensure(!user||user.status==='ACTIVE','ACCOUNT_FROZEN','账号已冻结，请联系客服',403);
   const data={openId:verified.openId,phone:lookup,phoneEncrypted:encrypt(verified.phone),phoneVerifiedAt:service.clock()};
   user=user?await tx.user.update({where:{id:user.id},data}):await tx.user.create({data:{...data,displayName:'微信用户',roles:['USER']}});
   const token=randomBytes(32).toString('hex');await tx.appSession.create({data:{id:digest(token),userId:user.id,expiresAt:new Date(service.clock().getTime()+24*3600000)}});

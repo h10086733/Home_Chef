@@ -95,6 +95,7 @@ bash scripts/pnpm.sh test
 bash scripts/pnpm.sh test:auth
 bash scripts/pnpm.sh test:wechat
 bash scripts/pnpm.sh test:integration
+bash scripts/test-full-lifecycle.sh
 bash scripts/pnpm.sh test:ui
 bash scripts/pnpm.sh build
 ```
@@ -104,6 +105,7 @@ bash scripts/pnpm.sh build
 | typecheck / test | 类型和各包单元测试，不等于完整业务验收 |
 | test:wechat | 先业务夹具，再真实支付代码；隔离库 home_chef_test_wechat、测试密钥和模拟微信响应 |
 | test:integration | home_chef_test 历史 sandbox 业务集成：履约、费用、售后、权限、审计等 |
+| test-full-lifecycle.sh | 隔离库单测：厨师申请→审核→用户定位下单→接单→履约→确认→评价→结算；沙箱付款，非微信真收、非 UI |
 | test:ui | 自动准备网页/H5、启动3001测试API；真实数据交互与地图夹具 |
 | test:maps | 同一隔离测试入口，仅跑地图/片区浏览器检查；不要直接运行旧方式 maps-browser.mjs |
 | build | 各包及微信小程序构建；H5另用 `--filter @home-chef/miniapp build:h5` |

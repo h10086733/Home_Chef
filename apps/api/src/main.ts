@@ -38,6 +38,7 @@ class ApiController {
       if(path==='/internal/tick'&&method==='POST'){ensure(process.env.INTERNAL_JOB_SECRET&&req.headers.authorization==='Bearer '+process.env.INTERNAL_JOB_SECRET,'FORBIDDEN','无权执行任务',403);return res.send(await service.tick());}
       // Public discovery returns only the existing safe chef projection; private routes still require a session.
       if(method==='GET'&&path==='/chefs')return res.send(await service.chefs(req.query));
+      if(method==='GET'&&path==='/agreements')return res.send(await service.agreements(String(req.query.kind??'')));
       const token=String(req.headers.authorization??'').replace(/^Bearer /,'');
       const user=await service.session(token);const context=logContext.getStore();if(context)context.userId=user.id;
       let result:unknown;
@@ -94,7 +95,15 @@ class ApiController {
       else if(parts[0]==='ops'){
         if(path==='/ops/dashboard'&&method==='GET')result=await service.dashboard(user);
         else if(path==='/ops/chefs'&&method==='GET')result=await service.opsChefs(user);
+        else if(parts[1]==='chefs'&&parts[2]&&parts[3]==='manage'&&method==='POST')result=await service.manageChef(user,parts[2],b);
         else if(parts[1]==='chefs'&&parts[2]&&method==='POST')result=await service.auditChef(user,parts[2],b);
+        else if(path==='/ops/users'&&method==='GET')result=await service.opsUsers(user);
+        else if(parts[1]==='users'&&parts[2]&&parts[3]==='phone'&&method==='GET')result=await service.revealUserPhone(user,parts[2]);
+        else if(parts[1]==='users'&&parts[2]&&method==='POST')result=await service.manageUser(user,parts[2],b);
+        else if(path==='/ops/agreements'&&method==='GET')result=await service.agreements();
+        else if(path==='/ops/agreements'&&method==='POST')result=await service.publishAgreement(user,b);
+        else if(path==='/ops/chats'&&method==='GET')result=await service.opsChats(user,req.query);
+        else if(parts[1]==='withdrawals'&&parts[2]&&parts[3]==='payout'&&method==='GET')result=await service.withdrawalPayout(user,parts[2]);
         else if(path==='/ops/tickets'&&method==='GET')result=await service.opsTickets(user);
         else if(parts[1]==='tickets'&&parts[2]&&method==='POST')result=await service.decideTicket(user,parts[2],b);
         else if(parts[1]==='settlements'&&parts[2]&&method==='POST')result=await service.settle(user,parts[2]);

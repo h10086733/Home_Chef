@@ -66,6 +66,7 @@ model User {
   username String? @unique
   passwordHash String?
   id           String   @id @default(cuid())
+  status       String   @default("ACTIVE")
   openId       String?  @unique
   phone        String?  @unique
   phoneEncrypted String?
@@ -404,6 +405,29 @@ model ChefWithdrawal {
   updatedAt DateTime @updatedAt
   @@index([chefId,createdAt])
   @@index([status,updatedAt])
+}
+model ChefPenalty {
+  id String @id @default(cuid())
+  chefId String
+  kind String
+  reason String
+  startsAt DateTime @default(now())
+  endsAt DateTime?
+  createdBy String
+  createdAt DateTime @default(now())
+  @@index([chefId,createdAt])
+}
+model AgreementVersion {
+  id String @id @default(cuid())
+  kind String
+  title String
+  content String
+  version Int
+  active Boolean @default(true)
+  publishedBy String
+  createdAt DateTime @default(now())
+  @@unique([kind,version])
+  @@index([kind,active,createdAt])
 }
 model ProfitShareTask {
   id String @id @default(cuid())

@@ -2,7 +2,7 @@ import { Prisma, User } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { Service, obj, HOUR } from './service';
 import { ensure, text, integer } from './errors';
-import { digest } from './security';
+import { decrypt, digest } from './security';
 type Data=Record<string,any>;
 export class MvpService extends Service {
 
@@ -142,10 +142,54 @@ export class MvpService extends Service {
   }
   async dashboard(user:User){
     this.role(user,'OPERATOR','ADMIN','FINANCE','FINANCE_MANAGER','CUSTOMER_SERVICE','REVIEWER','RISK');
-    const [orders,chefs,tickets,payments,refunds]=await Promise.all([this.db.order.count(),this.db.chef.count(),this.db.serviceTicket.count({where:{status:{not:'CLOSED'}}}),this.db.ledgerEntry.aggregate({where:{kind:'PAYMENT'},_sum:{amountFen:true}}),this.db.ledgerEntry.aggregate({where:{kind:'REFUND'},_sum:{amountFen:true}})]);
-    return {orders,chefs,openTickets:tickets,receivedFen:payments._sum.amountFen??0,refundedFen:-(refunds._sum.amountFen??0),sandbox:process.env.APP_MODE==='sandbox'};
+    const since=new Date(this.clock().getTime()-30*24*HOUR);
+    const [orders,chefs,users,newUsers,tickets,cancelled,disputes,payments,refunds]=await Promise.all([this.db.order.count(),this.db.chef.count(),this.db.user.count({where:{roles:{has:'USER'}}}),this.db.user.count({where:{createdAt:{gte:since},roles:{has:'USER'}}}),this.db.serviceTicket.count({where:{status:{not:'CLOSED'}}}),this.db.order.count({where:{contractStatus:'CANCELLED'}}),this.db.order.count({where:{aftersaleStatus:'PROCESSING'}}),this.db.ledgerEntry.aggregate({where:{kind:'PAYMENT'},_sum:{amountFen:true}}),this.db.ledgerEntry.aggregate({where:{kind:'REFUND'},_sum:{amountFen:true}})]);
+    return {orders,chefs,users,newUsers30d:newUsers,openTickets:tickets,cancelledOrders:cancelled,disputedOrders:disputes,cancellationRate:orders?cancelled/orders:0,disputeRate:orders?disputes/orders:0,receivedFen:payments._sum.amountFen??0,refundedFen:-(refunds._sum.amountFen??0),sandbox:process.env.APP_MODE==='sandbox'};
   }
-  async opsChefs(user:User){this.role(user,'REVIEWER','OPERATOR','ADMIN');const rows=await this.db.chef.findMany({include:{user:{select:{displayName:true}},packages:true},orderBy:{createdAt:'desc'}});return rows.map(c=>({...c,data:{...obj(c.data),healthAssetId:user.roles.includes('REVIEWER')?obj(c.data).healthAssetId:undefined}}));}
+  async opsChefs(user:User){this.role(user,'REVIEWER','OPERATOR','ADMIN');const rows=await this.db.chef.findMany({include:{user:{select:{displayName:true}},packages:true},orderBy:{createdAt:'desc'}});const penalties=await this.db.chefPenalty.findMany({orderBy:{createdAt:'desc'}});return rows.map(c=>({...c,penalties:penalties.filter(p=>p.chefId===c.id),data:{...obj(c.data),healthAssetId:user.roles.includes('REVIEWER')?obj(c.data).healthAssetId:undefined}}));}
+  async manageChef(user:User,id:string,b:Data){
+    this.role(user,'REVIEWER','OPERATOR','ADMIN');
+    return this.transaction(async tx=>{
+      const chef=await tx.chef.findUnique({where:{id}});ensure(chef,'NOT_FOUND','厨师不存在',404);
+      ensure(['SUSPENDED','BANNED','RESTORE'].includes(b.action),'INVALID_ACTION','厨师管理操作无效',400);
+      const reason=text(b.reason,'处理原因',500);
+      if(b.action==='RESTORE')ensure(chef.healthValidUntil&&chef.healthValidUntil>this.clock(),'EXPIRED_HEALTH','健康证已过期，不能恢复接单');
+      const status=b.action==='RESTORE'?'APPROVED':b.action,acceptingOrders=b.action==='RESTORE';
+      const row=await tx.chef.update({where:{id},data:{status,acceptingOrders}});
+      await tx.chefPenalty.create({data:{chefId:id,kind:b.action,reason,createdBy:user.id,...(b.action==='SUSPENDED'&&b.days?{endsAt:new Date(this.clock().getTime()+integer(b.days,'限制天数',1,365)*24*HOUR)}:{})}});
+      await tx.notification.create({data:{userId:chef.userId,body:b.action==='RESTORE'?'接单权限已恢复':b.action==='BANNED'?'账号已封禁：'+reason:'接单权限已暂停：'+reason}});
+      await this.audit(tx,user.id,'CHEF_'+b.action,id,{reason});return row;
+    });
+  }
+  async opsUsers(user:User){
+    this.role(user,'CUSTOMER_SERVICE','RISK','ADMIN');
+    const rows=await this.db.user.findMany({where:{roles:{has:'USER'}},select:{id:true,displayName:true,status:true,phoneVerifiedAt:true,createdAt:true,updatedAt:true,_count:{select:{customerOrders:true,addresses:true}}},orderBy:{createdAt:'desc'},take:500});
+    return rows.map(row=>({...row,phone:row.phoneVerifiedAt?'已绑定（默认脱敏）':'未绑定'}));
+  }
+  async manageUser(user:User,id:string,b:Data){
+    this.role(user,'RISK','ADMIN');ensure(user.id!==id,'SELF_ACTION','不能冻结本人',400);
+    return this.transaction(async tx=>{const target=await tx.user.findUnique({where:{id}});ensure(target,'NOT_FOUND','用户不存在',404);ensure(['freeze','restore'].includes(b.action),'INVALID_ACTION','用户操作无效',400);const status=b.action==='freeze'?'FROZEN':'ACTIVE';await tx.user.update({where:{id},data:{status}});if(status==='FROZEN')await tx.appSession.deleteMany({where:{userId:id}});await this.audit(tx,user.id,'USER_'+status,id,{reason:text(b.reason,'处理原因',500)});return {ok:true};});
+  }
+  async revealUserPhone(user:User,id:string){
+    this.role(user,'CUSTOMER_SERVICE','RISK','ADMIN');
+    return this.transaction(async tx=>{const target=await tx.user.findUnique({where:{id}});ensure(target?.phoneEncrypted,'PHONE_UNAVAILABLE','用户未绑定手机号',404);await this.audit(tx,user.id,'USER_PHONE_READ',id);return {phone:decrypt(target.phoneEncrypted)};});
+  }
+  async agreements(kind?:string){
+    const rows=await this.db.agreementVersion.findMany({where:{active:true,...(kind?{kind}:{})},orderBy:[{kind:'asc'},{version:'desc'}]});
+    return rows.filter((row,index)=>rows.findIndex(v=>v.kind===row.kind)===index).map(({publishedBy,...row})=>row);
+  }
+  async publishAgreement(user:User,b:Data){
+    this.role(user,'ADMIN');const kind=text(b.kind,'协议类型',40);ensure(['USER_SERVICE','PRIVACY','CHEF_SERVICE','REFUND_DISPUTE'].includes(kind),'INVALID_AGREEMENT','协议类型无效',400);
+    return this.transaction(async tx=>{const latest=await tx.agreementVersion.findFirst({where:{kind},orderBy:{version:'desc'}});await tx.agreementVersion.updateMany({where:{kind,active:true},data:{active:false}});const row=await tx.agreementVersion.create({data:{kind,title:text(b.title,'协议标题',100),content:text(b.content,'协议内容',50000),version:(latest?.version??0)+1,publishedBy:user.id}});await this.audit(tx,user.id,'AGREEMENT_PUBLISHED',row.id,{kind,version:row.version});return row;});
+  }
+  async opsChats(user:User,query:Data){
+    this.role(user,'CUSTOMER_SERVICE','RISK','ADMIN');
+    const userId=String(query.userId??''),chefId=String(query.chefId??'');ensure(userId||chefId,'SEARCH_REQUIRED','请输入用户 ID 或厨师 ID',400);
+    const orders=await this.db.order.findMany({where:{...(userId?{customerId:userId}:{}),...(chefId?{acceptedChefId:chefId}:{})},orderBy:{createdAt:'desc'},take:50});
+    const allowed=[] as Data[];
+    for(const order of orders){if(!await this.db.serviceTicket.findFirst({where:{orderId:order.id,status:{not:'CLOSED'}}}))continue;await this.db.$transaction(tx=>this.audit(tx,user.id,'CHAT_STAFF_READ',order.id));allowed.push({orderId:order.id,customerId:order.customerId,chefId:order.acceptedChefId,messages:await this.db.chatMessage.findMany({where:{orderId:order.id},orderBy:{createdAt:'asc'},take:200})});}
+    return allowed;
+  }
   async auditChef(user:User,id:string,b:Data){
     this.role(user,'REVIEWER');
     return this.transaction(async tx=>{
@@ -190,6 +234,7 @@ export class MvpService extends Service {
       const o=await tx.order.findUnique({where:{id}});ensure(o,'NOT_FOUND','订单不存在',404);
       if(o.settlementStatus==='SETTLED')return {ok:true};
       ensure(o.settlementStatus==='PENDING'&&o.feeStatus==='SETTLED'&&['NONE','CLOSED'].includes(o.aftersaleStatus)&&o.acceptedChefId,'SETTLEMENT_BLOCKED','订单尚不满足结算条件');
+      const eligibleAt=this.settlementEligibleAt(o);ensure(eligibleAt&&eligibleAt<=this.clock(),'SETTLEMENT_HOLD','订单需等待评价完成或评价期结束');
       const d=obj(o.details);ensure(!d.adjudicated,'ALLOCATION_PENDING','部分履约裁定资金分配需另行发布，禁止按普通佣金结算');
       ensure(o.confirmedAt&&o.balanceFen===0,'SETTLEMENT_BLOCKED','需要完成确认且无欠款');
       const net=o.receivedFen-o.refundedFen,commissionFen=Math.round(d.serviceFen*obj(o.ruleSnapshot).commissionRate),subsidyFen=d.discountFen??0,chefFen=net+subsidyFen-commissionFen;
@@ -203,9 +248,10 @@ export class MvpService extends Service {
   async publishRules(user:User,b:Data){
     this.role(user,'ADMIN');
     ensure(Number.isFinite(b.commissionRate)&&b.commissionRate>=0&&b.commissionRate<1,'INVALID_RATE','佣金比例无效',400);
-    integer(b.matchMinutes,'流拍分钟',1,30);integer(b.radiusM,'服务半径',100,10000);integer(b.urgentMinMinutes,'急单提前分钟',15,120);integer(b.couponFen,'券额',0,100000);integer(b.couponMinFen,'用券门槛',0,1000000);
+    integer(b.matchMinutes,'流拍分钟',1,30);integer(b.radiusM,'服务半径',100,10000);integer(b.urgentMinMinutes,'急单提前分钟',15,120);integer(b.autoConfirmHours??48,'自动确认小时',1,168);integer(b.settlementDelayHours??0,'评价后结算延迟',0,720);integer(b.couponFen,'券额',0,100000);integer(b.couponMinFen,'用券门槛',0,1000000);
+    ensure((b.settlementTrigger??'REVIEW_OR_EXPIRE')==='REVIEW_OR_EXPIRE','INVALID_SETTLEMENT_RULE','结算触发规则无效',400);
     ensure(Array.isArray(b.regions)&&b.regions.length>0&&b.regions.every((r:Data)=>typeof r.code==='string'&&typeof r.name==='string'&&typeof r.active==='boolean'),'INVALID_REGIONS','片区配置无效',400);
-    const data={commissionRate:b.commissionRate,matchMinutes:b.matchMinutes,radiusM:b.radiusM,urgentMinMinutes:b.urgentMinMinutes,couponFen:b.couponFen,couponMinFen:b.couponMinFen,couponEnabled:b.couponEnabled===true,regions:b.regions,sandbox:process.env.APP_MODE==='sandbox'};
+    const data={commissionRate:b.commissionRate,matchMinutes:b.matchMinutes,radiusM:b.radiusM,urgentMinMinutes:b.urgentMinMinutes,autoConfirmHours:b.autoConfirmHours??48,settlementTrigger:'REVIEW_OR_EXPIRE',settlementDelayHours:b.settlementDelayHours??0,couponFen:b.couponFen,couponMinFen:b.couponMinFen,couponEnabled:b.couponEnabled===true,regions:b.regions,sandbox:process.env.APP_MODE==='sandbox'};
     return this.transaction(async tx=>{const row=await tx.platformRule.create({data:{id:'rules-'+randomUUID(),data,publishedBy:user.id}});await this.audit(tx,user.id,'RULES_PUBLISHED',row.id,{reason:text(b.reason,'变更原因',500)});return row;});
   }
 }

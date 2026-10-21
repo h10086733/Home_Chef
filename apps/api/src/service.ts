@@ -34,7 +34,8 @@ export class Service {
     ensure(token, 'UNAUTHORIZED', '请先登录', 401);
     const s = await this.db.appSession.findUnique({ where: { id: digest(token) } });
     ensure(s && s.expiresAt > this.clock(), 'UNAUTHORIZED', '登录已过期', 401);
-    const u = await this.db.user.findUnique({ where: { id: s.userId } }); ensure(u, 'UNAUTHORIZED', '账号不存在', 401); return u;
+    const u = await this.db.user.findUnique({ where: { id: s.userId } }); ensure(u, 'UNAUTHORIZED', '账号不存在', 401);
+    ensure(u.status === 'ACTIVE', 'ACCOUNT_FROZEN', '账号已冻结，请联系客服', 403); return u;
   }
   async login(body: Data, register = false) {
     const username = text(body.username, '账号', 40), password = text(body.password, '密码', 128);
@@ -45,11 +46,25 @@ export class Service {
       ensure(!user, 'USERNAME_TAKEN', '账号已存在');
       try{user = await this.db.user.create({ data: { username, passwordHash: hashPassword(password), displayName: text(body.displayName, '昵称', 30), roles: ['USER'] } });}catch(e:any){if(e.code==='P2002')throw new ApiError(409,'USERNAME_TAKEN','账号已存在');throw e;}
     } else ensure(user?.passwordHash && checkPassword(password, user.passwordHash), 'INVALID_CREDENTIALS', '账号或密码不正确', 401);
+    ensure(user?.status === 'ACTIVE', 'ACCOUNT_FROZEN', '账号已冻结，请联系客服', 403);
     const token = randomBytes(32).toString('hex');
     await this.db.appSession.create({ data: { id: digest(token), userId: user!.id, expiresAt: new Date(this.clock().getTime() + 24 * HOUR) } });
     return { token, user: this.publicUser(user!) };
   }
   publicUser(user: User) { return { id: user.id, displayName: user.displayName, roles: user.roles, username: user.username, phoneBound:!!user.phoneVerifiedAt }; }
+  autoConfirmHours(order: Pick<Order,'ruleSnapshot'>) {
+    const value=Number(obj(order.ruleSnapshot).autoConfirmHours);
+    return Number.isInteger(value)&&value>=1&&value<=168?value:72;
+  }
+  settlementEligibleAt(order: Pick<Order,'confirmedAt'|'reviewStatus'|'ruleSnapshot'>,legacyHoldHours=168) {
+    if(!order.confirmedAt)return null;
+    const rules=obj(order.ruleSnapshot);
+    if(rules.settlementTrigger!=='REVIEW_OR_EXPIRE')return new Date(order.confirmedAt.getTime()+legacyHoldHours*HOUR);
+    if(!['REVIEWED','EXPIRED'].includes(order.reviewStatus))return null;
+    const delay=Number(rules.settlementDelayHours??0);
+    ensure(Number.isInteger(delay)&&delay>=0&&delay<=720,'FINANCE_CONFIG','结算延迟配置无效',503);
+    return new Date(order.confirmedAt.getTime()+delay*HOUR);
+  }
   async logout(token: string) { await this.db.appSession.deleteMany({ where: { id: digest(token) } }); return { ok: true }; }
   async addresses(user: User) {
     const rows = await this.db.address.findMany({ where: { userId: user.id } });
@@ -368,9 +383,11 @@ export class Service {
       const unpaid=await tx.order.findMany({where:{contractStatus:'PENDING_PAYMENT'}});
       for(const o of unpaid)if(new Date(obj(o.details).paymentDeadline)<=this.clock()){await this.cancelTx(tx,o,null,'付款期限已过');expired++;}
       for(const o of pending) if(new Date(obj(o.details).acceptanceDeadline)<=this.clock()){await this.cancelTx(tx,o,null,'接单超时');expired++;}
-      const waiting=await tx.order.findMany({where:{fulfillmentStatus:'AWAITING_CONFIRMATION',aftersaleStatus:'NONE',serviceEndsAt:{lte:new Date(this.clock().getTime()-72*HOUR)}}});
-      for(let o of waiting) { const d=obj(o.details); if(!d.assetId || (d.actualIngredientFen>0&&!d.receiptId)) continue; if(!d.feesConfirmedAt)o=await this.confirmFeesTx(tx,o); await this.confirmTx(tx,o,null);confirmed++; }
+      const waiting=await tx.order.findMany({where:{fulfillmentStatus:'AWAITING_CONFIRMATION',aftersaleStatus:'NONE',serviceEndsAt:{not:null}}});
+      for(let o of waiting) { if(!o.serviceEndsAt||o.serviceEndsAt.getTime()+this.autoConfirmHours(o)*HOUR>this.clock().getTime())continue;const d=obj(o.details); if(!d.assetId || (d.actualIngredientFen>0&&!d.receiptId)) continue; if(!d.feesConfirmedAt)o=await this.confirmFeesTx(tx,o); await this.confirmTx(tx,o,null);confirmed++; }
       await tx.order.updateMany({where:{reviewStatus:'OPEN',confirmedAt:{lt:new Date(this.clock().getTime()-7*24*HOUR)}},data:{reviewStatus:'EXPIRED'}});
+      const healthDue=await tx.chef.findMany({where:{healthValidUntil:{gt:this.clock(),lte:new Date(this.clock().getTime()+30*24*HOUR)},status:{in:['TRIAL','APPROVED']}}});
+      for(const chef of healthDue){const days=Math.max(1,Math.ceil((chef.healthValidUntil!.getTime()-this.clock().getTime())/(24*HOUR))),bucket=days<=7?7:30;await tx.notification.upsert({where:{id:`health:${chef.id}:${chef.healthValidUntil!.toISOString()}:${bucket}`},create:{id:`health:${chef.id}:${chef.healthValidUntil!.toISOString()}:${bucket}`,userId:chef.userId,body:`健康证将在${days}天内到期，请及时补充新材料`},update:{}});}
       await tx.chef.updateMany({where:{healthValidUntil:{lte:this.clock()},acceptingOrders:true},data:{acceptingOrders:false,status:'SUSPENDED'}});
       const events=await tx.outboxEvent.findMany({where:{publishedAt:null},orderBy:{occurredAt:'asc'},take:100});
       for(const e of events){ const p=obj(e.payload); for(const userId of p.recipients??[])await tx.notification.upsert({where:{id:e.id+':'+userId},create:{id:e.id+':'+userId,userId,orderId:e.aggregateId,body:p.body??e.eventType},update:{}});await tx.outboxEvent.update({where:{id:e.id},data:{publishedAt:this.clock(),attempts:{increment:1}}}); }

@@ -17,7 +17,7 @@ async function fixture(){
   users[name]=await db.user.create({data:{username:prefix+'_'+name,displayName:name,roles:roles as any,passwordHash:hashPassword('TestingPassword2026!')}});
  }
  ruleId=prefix+'-rules';
- await db.platformRule.create({data:{id:ruleId,publishedBy:users.operator.id,data:{sandbox:true,regions:[{code:prefix,name:'测试片区',active:true}],radiusM:3000,matchMinutes:10,urgentMinMinutes:30,commissionRate:.15,couponEnabled:true,couponFen:2000,couponMinFen:20000}}});
+ await db.platformRule.create({data:{id:ruleId,publishedBy:users.operator.id,data:{sandbox:true,regions:[{code:prefix,name:'测试片区',active:true}],radiusM:3000,matchMinutes:10,urgentMinMinutes:30,autoConfirmHours:48,settlementTrigger:'REVIEW_OR_EXPIRE',settlementDelayHours:0,commissionRate:.15,couponEnabled:true,couponFen:2000,couponMinFen:20000}}});
  const a=await service.address(users.customer,{label:'家',regionCode:prefix,latitude:28.194,longitude:112.961,fullText:'仅属于测试用户的完整地址'});addressId=a.id;
  for(let i=0;i<3;i++){
   const c=await db.chef.create({data:{userId:users['chef'+i].id,status:'TRIAL',acceptingOrders:true,healthValidUntil:new Date(now.getTime()+180*86400000),data:{regionCode:prefix,latitude:28.194+i*.001,longitude:112.961,cuisines:['湘菜']}}});chefIds.push(c.id);
@@ -121,9 +121,10 @@ test('MVP PostgreSQL acceptance scenarios',async t=>{
   await service.customerAction(users.customer,o.id,'balance',{idempotencyKey:'balance'});
   await service.customerAction(users.customer,o.id,'balance',{idempotencyKey:'balance'});
   assert.equal(await db.paymentRequest.count({where:{orderId:o.id,kind:'BALANCE'}}),1);
+  await assert.rejects(()=>service.settle(users.finance,o.id),/评价/);
+  await service.review(users.customer,o.id,{taste:5,service:4,punctuality:5,body:'家宴满意'});
   const settled=await service.settle(users.finance,o.id);assert.equal((settled as any).chefFen,34000);
   await service.settle(users.finance,o.id);assert.equal(await db.ledgerEntry.count({where:{reference:'settlement:'+o.id}}),1);
-  await service.review(users.customer,o.id,{taste:5,service:4,punctuality:5,body:'家宴满意'});
   await assert.rejects(()=>service.review(users.customer,o.id,{taste:5,service:5,punctuality:5,body:'重复'}));
   await service.review(users.customer,o.id,{followup:'下次还会预约'});
   now=previous;
@@ -151,13 +152,14 @@ test('MVP PostgreSQL acceptance scenarios',async t=>{
   const ledger=await db.ledgerEntry.findFirstOrThrow({where:{orderId:o.id}});
   await assert.rejects(()=>db.ledgerEntry.update({where:{id:ledger.id},data:{amountFen:0}}),/append-only/);
  });
- await t.test('72h confirmation does not auto-charge balance; outbox deliveries deduplicate',async()=>{
+ await t.test('48h confirmation does not auto-charge balance; outbox deliveries deduplicate',async()=>{
   const q=await service.quote(users.customer,input(11)),o=await pay(q);await service.accept(users.chef0,o.id);
   const previous=now;now=new Date(q.details.startsAt);
   for(const action of['depart','arrive','start'])await service.fulfill(users.chef0,o.id,{action,evidence:'记录'});
   const a=await service.upload(users.chef0,{orderId:o.id,mime:'image/png',base64:png});
   await service.fulfill(users.chef0,o.id,{action:'complete',evidence:'完成',assetId:a.id,actualIngredientFen:0});
-  now=new Date(now.getTime()+72*3600000);await service.tick();const row=await db.order.findUniqueOrThrow({where:{id:o.id}});
+  now=new Date(now.getTime()+47*3600000);await service.tick();assert.equal((await db.order.findUniqueOrThrow({where:{id:o.id}})).fulfillmentStatus,'AWAITING_CONFIRMATION');
+  now=new Date(now.getTime()+3600000);await service.tick();const row=await db.order.findUniqueOrThrow({where:{id:o.id}});
   assert.equal(row.fulfillmentStatus,'COMPLETED');assert.equal(row.balanceFen,21000);assert.equal(row.receivedFen,9000);assert.equal(row.settlementStatus,'FROZEN');
   const count=await db.notification.count({where:{orderId:o.id}});await service.tick();assert.equal(await db.notification.count({where:{orderId:o.id}}),count);now=previous;
  });
@@ -204,5 +206,15 @@ test('MVP PostgreSQL acceptance scenarios',async t=>{
   const row=await db.order.findUniqueOrThrow({where:{id:o.id}});assert.equal(row.receivedFen,40000);assert.equal(row.refundedFen,5000);assert.equal(row.balanceFen,0);
   assert.equal(await db.ledgerEntry.count({where:{orderId:o.id,kind:'REFUND'}}),1);
   await service.customerAction(users.customer,o.id,'confirm',{});now=previous;
+ });
+ await t.test('operations can freeze users, manage chef access and publish versioned agreements',async()=>{
+  const auth=await service.login({username:users.stranger.username,password:'TestingPassword2026!'});
+  await service.manageUser(users.operator,users.stranger.id,{action:'freeze',reason:'隔离测试冻结'});await assert.rejects(()=>service.session(auth.token),/过期|冻结/);
+  await service.manageUser(users.operator,users.stranger.id,{action:'restore',reason:'隔离测试恢复'});assert.equal((await db.user.findUniqueOrThrow({where:{id:users.stranger.id}})).status,'ACTIVE');
+  await service.manageChef(users.operator,chefIds[2],{action:'SUSPENDED',reason:'隔离测试限制'});assert.equal((await db.chef.findUniqueOrThrow({where:{id:chefIds[2]}})).acceptingOrders,false);
+  await service.manageChef(users.operator,chefIds[2],{action:'RESTORE',reason:'隔离测试恢复'});assert.equal((await db.chef.findUniqueOrThrow({where:{id:chefIds[2]}})).acceptingOrders,true);
+  const first=await service.publishAgreement(users.operator,{kind:'USER_SERVICE',title:'测试用户协议',content:'第一版内容'}),second=await service.publishAgreement(users.operator,{kind:'USER_SERVICE',title:'测试用户协议',content:'第二版内容'});
+  assert.equal(second.version,first.version+1);const agreements=await service.agreements('USER_SERVICE');assert.equal(agreements.length,1);assert.equal(agreements[0].version,second.version);
+  assert((await service.opsUsers(users.operator)).some(u=>u.id===users.stranger.id));assert.equal(await db.auditEvent.count({where:{aggregateId:users.stranger.id,action:{startsWith:'USER_'}}}),2);
  });
 });
