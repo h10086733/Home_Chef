@@ -320,7 +320,7 @@ export class MvpService extends Service {
   async publishRules(user:User,b:Data){
     this.role(user,'ADMIN');
     ensure(Number.isFinite(b.commissionRate)&&b.commissionRate>=0&&b.commissionRate<1,'INVALID_RATE','佣金比例无效',400);
-    integer(b.matchMinutes,'流拍分钟',1,30);integer(b.radiusM,'服务半径',100,10000);integer(b.urgentMinMinutes,'急单提前分钟',15,120);integer(b.settlementDelayHours??0,'评价后结算延迟',0,720);integer(b.couponFen,'券额',0,100000);integer(b.couponMinFen,'用券门槛',0,1000000);
+    integer(b.matchMinutes,'流拍分钟',1,30);integer(b.radiusM,'服务半径',100,30000);integer(b.urgentMinMinutes,'急单提前分钟',15,120);integer(b.settlementDelayHours??0,'评价后结算延迟',0,720);integer(b.couponFen,'券额',0,100000);integer(b.couponMinFen,'用券门槛',0,1000000);
     const s=srsInput(b);
     ensure(Array.isArray(b.regions)&&b.regions.length>0&&b.regions.every((r:Data)=>typeof r.code==='string'&&typeof r.name==='string'&&typeof r.active==='boolean'),'INVALID_REGIONS','片区配置无效',400);
     const data={...s,commissionRate:b.commissionRate,matchMinutes:b.matchMinutes,radiusM:b.radiusM,urgentMinMinutes:b.urgentMinMinutes,autoConfirmHours:s.autoConfirmHours,settlementDelayHours:b.settlementDelayHours??0,couponFen:b.couponFen,couponMinFen:b.couponMinFen,couponEnabled:b.couponEnabled===true,regions:b.regions,sandbox:process.env.APP_MODE==='sandbox'};

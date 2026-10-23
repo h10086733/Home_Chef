@@ -9,6 +9,11 @@ type Tx = Prisma.TransactionClient;
 type Data = Record<string, any>;
 const obj = (v: unknown): Data => v && typeof v === 'object' && !Array.isArray(v) ? v as Data : {};
 const HOUR = 3600000;
+const SERVICE_RADIUS_M = 15000;
+function radiusMeters(rules: Data) {
+  const configured = Number(rules?.radiusM);
+  return Number.isFinite(configured) && configured > 3000 ? configured : SERVICE_RADIUS_M;
+}
 const SAFE_CHEF = { id: true, status: true, healthValidUntil: true, serviceRadiusM: true, acceptingOrders: true, user: { select: { displayName: true } }, packages: { where: { active: true } } } as const;
 export class Service {
   constructor(readonly db: PrismaClient, readonly clock: () => Date = () => new Date()) {}
@@ -146,7 +151,7 @@ export class Service {
     ensure(sort!=='distance'||located,'LOCATION_REQUIRED','请先选择位置',400);
     const rules=await this.rules(this.db),regionCode=String(query.regionCode??''),s=srs(rules);
     const result=rows.filter(c=>insuranceOk(s,c.insuranceValidUntil,this.clock())).map(c=>{const d=obj(c.data),r=ratings.find(v=>v.chefId===c.id),distanceM=located?this.distance(lat,lng,d.latitude,d.longitude):null;
-      return {id:c.id,name:c.user.displayName,status:c.status,healthValidUntil:c.healthValidUntil,serviceRadiusM:rules.radiusM??c.serviceRadiusM,cuisines:d.cuisines??[],bio:d.bio??'',regionCode:d.regionCode,packages:c.packages,rating:r?((r._avg.taste??0)+(r._avg.service??0)+(r._avg.punctuality??0))/3:null,reviewCount:r?._count._all??0,distanceM:Number.isFinite(distanceM)?distanceM:null};
+      return {id:c.id,name:c.user.displayName,status:c.status,healthValidUntil:c.healthValidUntil,serviceRadiusM:radiusMeters(rules),cuisines:d.cuisines??[],bio:d.bio??'',regionCode:d.regionCode,packages:c.packages,rating:r?((r._avg.taste??0)+(r._avg.service??0)+(r._avg.punctuality??0))/3:null,reviewCount:r?._count._all??0,distanceM:Number.isFinite(distanceM)?distanceM:null};
     }).filter(c=>rules.regions.some((r:Data)=>r.active&&r.code===c.regionCode)&&(!regionCode||c.regionCode===regionCode)&&(!cuisine||cuisine==='全部'||c.cuisines.includes(cuisine))&&(!search||[c.name,c.bio,...c.cuisines,...c.packages.map(p=>p.name+' '+p.description)].join(' ').toLocaleLowerCase().includes(search))&&(!located||(c.distanceM!==null&&c.distanceM<=c.serviceRadiusM)));
     const price=(c:typeof result[number])=>c.packages.length?Math.min(...c.packages.map(p=>p.serviceFen)):Number.MAX_SAFE_INTEGER;
     result.sort((x,y)=>sort==='price_asc'?price(x)-price(y):sort==='price_desc'?price(y)-price(x):sort==='distance'?(x.distanceM??Infinity)-(y.distanceM??Infinity):x.id.localeCompare(y.id));
@@ -244,7 +249,7 @@ export class Service {
       ensure(['CUSTOMER','CHEF'].includes(b.ingredientMode), 'INVALID_INGREDIENT_MODE', '请选择食材方式', 400);
       const ingredientFen = b.ingredientMode === 'CHEF' ? integer(b.ingredientFen, '采购预算', 100, 100000) : 0;
       const guests = integer(b.guests, '用餐人数', 1, 30);
-      const details: Data = { mode: b.mode === 'MATCH' ? 'MATCH' : 'SELF', addressId: a.id, regionCode: a.regionCode, latitude: Number(a.latitude), longitude: Number(a.longitude), maskedAddress: a.maskedText, encryptedAddress: a.encryptedText, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), urgent, guests, children: integer(b.children ?? 0, '儿童人数', 0, guests), elders: integer(b.elders ?? 0, '老人人数', 0, guests), allergens: text(b.allergens, '过敏信息（没有请填无已知过敏）', 200), kitchen: text(b.kitchen, '厨房条件', 200), taste: text(b.taste ?? '家常口味', '口味', 200), ingredientMode: b.ingredientMode, ingredientFen, serviceFen: pkg.serviceFen, cuisine: text(b.cuisine, '菜系', 30), packageName: pkg.name, serviceScope: pkg.description, radiusM: rules.radiusM, couponId: null, discountFen: 0, rules };
+      const details: Data = { mode: b.mode === 'MATCH' ? 'MATCH' : 'SELF', addressId: a.id, regionCode: a.regionCode, latitude: Number(a.latitude), longitude: Number(a.longitude), maskedAddress: a.maskedText, encryptedAddress: a.encryptedText, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), urgent, guests, children: integer(b.children ?? 0, '儿童人数', 0, guests), elders: integer(b.elders ?? 0, '老人人数', 0, guests), allergens: text(b.allergens, '过敏信息（没有请填无已知过敏）', 200), kitchen: text(b.kitchen, '厨房条件', 200), taste: text(b.taste ?? '家常口味', '口味', 200), ingredientMode: b.ingredientMode, ingredientFen, serviceFen: pkg.serviceFen, cuisine: text(b.cuisine, '菜系', 30), packageName: pkg.name, serviceScope: pkg.description, radiusM: radiusMeters(rules), couponId: null, discountFen: 0, rules };
       ensure(details.children + details.elders <= guests, 'INVALID_GUESTS', '儿童与老人总数不能超过用餐人数', 400);
       if (b.couponId) {
         const coupon = await tx.coupon.findUnique({ where: { id: text(b.couponId, '优惠券') } });

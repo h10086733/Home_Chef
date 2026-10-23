@@ -334,7 +334,7 @@ test('MVP PostgreSQL acceptance scenarios',async t=>{
   assert(!(await service.chefs({latitude:28.194,longitude:112.961,regionCode:other})).some(c=>c.id===chefIds[0]));
   const q=await service.quote(users.customer,input(21,{addressId:near.id}));
   assert.equal(q.chefId,chefIds[0]);
-  const far=await service.address(users.customer,{label:'远处',regionCode:other,latitude:28.25,longitude:113.05,fullText:'超出服务半径的测试地址'});
+  const far=await service.address(users.customer,{label:'远处',regionCode:other,latitude:28.45,longitude:113.2,fullText:'超出服务半径的测试地址'});
   await assert.rejects(()=>service.quote(users.customer,input(21,{addressId:far.id})),/不服务所选地址/);
  });
 });

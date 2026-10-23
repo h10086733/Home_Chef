@@ -16,7 +16,7 @@ export interface MatchRequest {
 /** Filters and ranks candidates without mutating availability. Claiming a slot
  * must happen transactionally in the schedule/booking repository. */
 export function recommendChefs(candidates: readonly ChefCandidate[], request: MatchRequest): ChefCandidate[] {
-  const radius = request.radiusM ?? 3000;
+  const radius = request.radiusM ?? 15000;
   const max = request.maxCandidates ?? 3;
   if (!Number.isFinite(radius) || radius <= 0) throw new Error('radiusM must be positive');
   if (!Number.isInteger(max) || max <= 0) throw new Error('maxCandidates must be positive');

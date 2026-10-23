@@ -110,7 +110,7 @@ model Chef {
   status         String   @default("PENDING_REVIEW")
   healthValidUntil DateTime?
   insuranceValidUntil DateTime?
-  serviceRadiusM Int      @default(3000)
+  serviceRadiusM Int      @default(15000)
   acceptingOrders Boolean @default(false)
   user           User     @relation(fields: [userId], references: [id])
   packages       ServicePackage[]

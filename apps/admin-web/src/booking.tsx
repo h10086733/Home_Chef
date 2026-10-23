@@ -4,7 +4,7 @@ import{useEffect,useState}from'react';import{Modal,Select,Input,InputNumber,Chec
 function meters(lat1:number,lng1:number,lat2:number,lng2:number){const rad=Math.PI/180,a=Math.sin((lat2-lat1)*rad/2)**2+Math.cos(lat1*rad)*Math.cos(lat2*rad)*Math.sin((lng2-lng1)*rad/2)**2;return 6371000*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));}
 function addressNear(rows:Row[]|undefined,location:Row|null|undefined,chef:Row|null){
  if(!rows?.length||!location||!chef||!Number.isFinite(Number(location.latitude))||!Number.isFinite(Number(chef.distanceM)))return undefined;
- const room=Number(chef.serviceRadiusM??3000)-Number(chef.distanceM);let best:Row|undefined,bestD=Infinity;
+ const room=Number(chef.serviceRadiusM??15000)-Number(chef.distanceM);let best:Row|undefined,bestD=Infinity;
  for(const row of rows){const d=meters(Number(location.latitude),Number(location.longitude),Number(row.latitude),Number(row.longitude));if(Number.isFinite(d)&&d<=room&&d<bestD){best=row;bestD=d;}}
  return best;
 }
@@ -17,7 +17,7 @@ export function Booking({chef,close,run,onDone,location}:{chef:Row|null,close:()
  const lat=Number(address?.latitude),lng=Number(address?.longitude);
  const nearby=useData('/chefs?latitude='+lat+'&longitude='+lng,!!chef&&!!address&&Number.isFinite(lat)&&Number.isFinite(lng));
  const inRange=!!address&&nearby.data?.some((c:Row)=>c.id===chef?.id);
- const pinCovers=!!location&&Number.isFinite(Number(chef?.distanceM))&&Number(chef?.distanceM)<=Number(chef?.serviceRadiusM??3000);
+ const pinCovers=!!location&&Number.isFinite(Number(chef?.distanceM))&&Number(chef?.distanceM)<=Number(chef?.serviceRadiusM??15000);
  useEffect(()=>{setAddingAddress(false);setQuote(null);setKey(crypto.randomUUID());if(chef)setForm(f=>({...f,addressId:undefined,packageId:chef.packages[0]?.id,cuisine:chef.cuisines[0]??'家常菜'}));},[chef]);
  useEffect(()=>{if(!chef||form.addressId)return;const picked=addressNear(addresses.data,location,chef);if(picked)setForm(f=>f.addressId?f:{...f,addressId:picked.id});},[chef,addresses.data,location,form.addressId]);
  const set=(k:string,v:unknown)=>{if(quote)void run(async()=>{await api('/quotes/'+quote.id+'/cancel',{});setForm({...form,[k]:v});setQuote(null);},'已撤回旧报价，请重新确认');else setForm({...form,[k]:v});};

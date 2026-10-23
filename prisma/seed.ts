@@ -7,7 +7,7 @@ async function main(){
   const specs=[['demo','林女士',['USER']],['chef1','陈师傅',['USER','CHEF']],['chef2','刘师傅',['USER','CHEF']],['chef3','周师傅',['USER','CHEF']],['operator','运营审核',['OPERATOR','REVIEWER','ADMIN']],['support','客服仲裁',['CUSTOMER_SERVICE','RISK']],['manager','财务负责人',['FINANCE_MANAGER']],['finance','财务执行',['FINANCE']]] as const;
   const users:Record<string,any>={};
   for(const [username,displayName,roles]of specs)users[username]=await db.user.upsert({where:{username},update:{},create:{username,displayName,roles:[...roles],passwordHash:hashPassword(password)}});
-  await db.platformRule.upsert({where:{id:'sandbox-v1'},update:{},create:{id:'sandbox-v1',publishedBy:users.operator.id,data:{sandbox:true,commissionRate:.15,matchMinutes:10,radiusM:3000,urgentMinMinutes:30,couponFen:2000,couponMinFen:20000,couponEnabled:true,regions:[{code:'CS-YL',name:'长沙 · 岳麓试运营片区',active:true},{code:'CS-TX',name:'长沙 · 天心待开放片区',active:false}]}}});
+  await db.platformRule.upsert({where:{id:'sandbox-v1'},update:{},create:{id:'sandbox-v1',publishedBy:users.operator.id,data:{sandbox:true,commissionRate:.15,matchMinutes:10,radiusM:15000,urgentMinMinutes:30,couponFen:2000,couponMinFen:20000,couponEnabled:true,regions:[{code:'CS-YL',name:'长沙 · 岳麓试运营片区',active:true},{code:'CS-TX',name:'长沙 · 天心待开放片区',active:false}]}}});
   await db.address.upsert({where:{id:'demo-address'},update:{},create:{id:'demo-address',userId:users.demo.id,label:'家',regionCode:'CS-YL',latitude:28.194,longitude:112.961,maskedText:'长沙 · 岳麓试运营片区',encryptedText:encrypt('演示地址：岳麓区家庭厨房（虚构，勿实际前往）')}});
   const now=new Date(),from=new Date(now.getTime()-86400000),to=new Date(now.getTime()+32*86400000);
   for(let i=1;i<=3;i++){
