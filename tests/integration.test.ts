@@ -286,9 +286,10 @@ test('MVP PostgreSQL acceptance scenarios',async t=>{
   await service.cancel(users.customer,mid.id,{reason:'临时有事',expectedDeductFen:9000});
   row=await db.order.findUniqueOrThrow({where:{id:mid.id}});assert.equal(row.refundedFen,21000);assert.equal(row.settlementStatus,'PENDING');assert.equal((row.details as any).cancelCompensationFen,9000);
   const finance=new ChefFinanceService(db,()=>now);
-  assert.equal(await finance.autoSettle(),0);
+  await finance.autoSettle();
+  assert.equal((await db.order.findUniqueOrThrow({where:{id:mid.id}})).settlementStatus,'PENDING');
   const previous=now;now=new Date(now.getTime()+25*3600000);
-  assert.equal(await finance.autoSettle(),1);now=previous;
+  await finance.autoSettle();now=previous;
   row=await db.order.findUniqueOrThrow({where:{id:mid.id}});assert.equal(row.settlementStatus,'SETTLED');assert.equal((row.details as any).settlement.chefFen,9000);
   assert.equal((await db.ledgerEntry.aggregate({where:{orderId:mid.id},_sum:{amountFen:true}}))._sum.amountFen,0);
 
@@ -324,5 +325,16 @@ test('MVP PostgreSQL acceptance scenarios',async t=>{
   now=new Date(now.getTime()+16*86400000);await service.tick();now=previous;
   const gone=await db.user.findUniqueOrThrow({where:{id:me.id}});assert.equal(gone.status,'DELETED');assert.equal(gone.username,null);assert.equal(gone.passwordHash,null);
   await assert.rejects(()=>service.requestDeletion(users.operator,{confirm:true}),/工作人员/);
+ });
+ await t.test('a chef found by location can be quoted when the address district code differs',async()=>{
+  const live=await service.rules(db),other=prefix+'-other';
+  await service.publishRules(users.operator,{...live,regions:[...live.regions,{code:other,name:'另一开放片区',active:true}],reason:'上门范围按距离，不要求片区代码相同'});
+  const near=await service.address(users.customer,{label:'定位点',regionCode:other,latitude:28.194,longitude:112.961,fullText:'与厨师出发位置相同、片区代码不同的测试地址'});
+  assert((await service.chefs({latitude:28.194,longitude:112.961})).some(c=>c.id===chefIds[0]));
+  assert(!(await service.chefs({latitude:28.194,longitude:112.961,regionCode:other})).some(c=>c.id===chefIds[0]));
+  const q=await service.quote(users.customer,input(21,{addressId:near.id}));
+  assert.equal(q.chefId,chefIds[0]);
+  const far=await service.address(users.customer,{label:'远处',regionCode:other,latitude:28.25,longitude:113.05,fullText:'超出服务半径的测试地址'});
+  await assert.rejects(()=>service.quote(users.customer,input(21,{addressId:far.id})),/不服务所选地址/);
  });
 });

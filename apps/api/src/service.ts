@@ -220,7 +220,7 @@ export class Service {
     if (!insuranceOk(srs(live), c.insuranceValidUntil, new Date(d.endsAt))) return false;
     const cd = obj(c.data);
     if (![cd.latitude,cd.longitude,d.latitude,d.longitude].every(Number.isFinite)) return false;
-    if (cd.regionCode !== d.regionCode || (d.cuisine && !cd.cuisines?.includes(d.cuisine))) return false;
+    if (!live.regions.some((r: Data) => r.active && r.code === cd.regionCode) || (d.cuisine && !cd.cuisines?.includes(d.cuisine))) return false;
     if (this.distance(d.latitude, d.longitude, cd.latitude, cd.longitude) > (d.radiusM ?? c.serviceRadiusM)) return false;
     const startsAt = new Date(new Date(d.startsAt).getTime() - HOUR), endsAt = new Date(new Date(d.endsAt).getTime() + HOUR);
     const slot = await tx.scheduleSlot.findFirst({ where: { chefId, status: 'AVAILABLE', startsAt: { lte: startsAt }, endsAt: { gte: endsAt } } });
@@ -252,7 +252,7 @@ export class Service {
         details.couponId = coupon.id; details.discountFen = Math.min(coupon.amountFen, pkg.serviceFen); details.couponVersion = coupon.ruleVersion;
       }
       const provider=await tx.chef.findUnique({where:{id:pkg.chefId}}),providerData=obj(provider?.data);
-      ensure(provider&&providerData.regionCode===a.regionCode&&[providerData.latitude,providerData.longitude].every(Number.isFinite)&&this.distance(details.latitude,details.longitude,providerData.latitude,providerData.longitude)<=details.radiusM,'CHEF_OUT_OF_RANGE','该厨师不服务所选地址，请更换地址或厨师');
+      ensure(provider&&rules.regions.some((r:Data)=>r.active&&r.code===providerData.regionCode)&&[providerData.latitude,providerData.longitude].every(Number.isFinite)&&this.distance(details.latitude,details.longitude,providerData.latitude,providerData.longitude)<=details.radiusM,'CHEF_OUT_OF_RANGE','该厨师不服务所选地址，请更换地址或厨师');
       ensure(await this.available(tx, pkg.chefId, details), 'CHEF_UNAVAILABLE', '厨师在所选时间不可预约，请检查档期、服务时长或更换厨师');
       const totalFen = pkg.serviceFen + ingredientFen - details.discountFen, depositFen = Math.round(totalFen * .3);
       const q = await tx.quote.create({ data: { customerId: user.id, chefId: pkg.chefId, packageId: pkg.id, totalFen, depositFen, balanceFen: totalFen - depositFen, ruleVersion: rules.id, expiresAt: new Date(this.clock().getTime() + (s?.payTimeoutMinutes ?? 30) * 60000), details } });
