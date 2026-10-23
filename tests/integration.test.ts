@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {PrismaClient} from '@prisma/client';
 import {MvpService} from '../apps/api/src/support';
+import {ChefFinanceService} from '../apps/api/src/chef-finance';
 import {hashPassword,checkPassword,encrypt,decrypt} from '../apps/api/src/security';
 const db=new PrismaClient();
 let now=new Date();now.setUTCSeconds(0,0);
@@ -99,7 +100,7 @@ test('MVP PostgreSQL acceptance scenarios',async t=>{
   assert.equal(q.totalFen,28000);assert.equal(q.depositFen,8400);
   const o=await pay(q);
   assert.equal((await db.coupon.findUniqueOrThrow({where:{id:coupon.id}})).status,'USED');
-  await service.publishRules(users.operator,{...q.details.rules,commissionRate:.2,reason:'测试规则版本'});
+  await service.publishRules(users.operator,{...q.details.rules,commissionRate:.2,commissionBase:'SERVICE',insuranceRequired:false,reason:'测试规则版本'});
   assert.equal((o.ruleSnapshot as any).commissionRate,.15);
   await service.cancel(users.customer,o.id,{reason:'取消退券'});
   assert.equal((await db.coupon.findUniqueOrThrow({where:{id:coupon.id}})).status,'AVAILABLE');
@@ -151,6 +152,44 @@ test('MVP PostgreSQL acceptance scenarios',async t=>{
   await assert.rejects(()=>db.auditEvent.delete({where:{id:event.id}}),/append-only/);
   const ledger=await db.ledgerEntry.findFirstOrThrow({where:{orderId:o.id}});
   await assert.rejects(()=>db.ledgerEntry.update({where:{id:ledger.id},data:{amountFen:0}}),/append-only/);
+ });
+ await t.test('adjudicated remainder settles, and a settled refund posts recovery without rewriting the settlement',async()=>{
+  const previous=now;
+  async function served(day:number){
+   const q=await service.quote(users.customer,input(day)),o=await pay(q,{paymentChoice:'FULL_PAYMENT'});
+   await service.accept(users.chef0,o.id);now=new Date(q.details.startsAt);
+   for(const action of ['depart','arrive','start'])await service.fulfill(users.chef0,o.id,{action,evidence:'测试签到'});
+   const asset=await service.upload(users.chef0,{orderId:o.id,mime:'image/png',base64:png});
+   await service.fulfill(users.chef0,o.id,{action:'complete',evidence:'完成',assetId:asset.id,actualIngredientFen:0});
+   await service.customerAction(users.customer,o.id,'confirm-fees',{});
+   await service.customerAction(users.customer,o.id,'confirm',{});
+   return db.order.findUniqueOrThrow({where:{id:o.id}});
+  }
+  try{
+   const open=await served(18);
+   const ticket=await service.ticket(users.customer,open.id,{reason:'少做一道'});
+   await service.decideTicket(users.support,ticket.id,{action:'propose',refundFen:6000,decision:'退部分服务费'});
+   await service.decideTicket(users.manager,ticket.id,{action:'approve'});
+   await service.decideTicket(users.finance,ticket.id,{action:'execute'});
+   let row=await db.order.findUniqueOrThrow({where:{id:open.id}});
+   assert.equal(row.refundedFen,6000);assert.equal(row.settlementStatus,'PENDING');assert.equal((row.details as any).adjudicatedNetFen,24000);
+   const rate=(open.ruleSnapshot as any).commissionRate as number,fullChef=30000-Math.round(30000*rate),nextChef=24000-Math.round(24000*rate);
+   await service.review(users.customer,open.id,{taste:4,service:4,punctuality:4,body:'已裁定'});
+   now=open.confirmedAt!;
+   const partial=await service.settle(users.finance,open.id);assert.equal((partial as any).chefFen,nextChef);assert.equal((partial as any).commissionFen,Math.round(24000*rate));
+   const done=await served(19);
+   await service.review(users.customer,done.id,{taste:5,service:5,punctuality:5,body:'先结算'});
+   now=done.confirmedAt!;
+   const settled=await service.settle(users.finance,done.id);assert.equal((settled as any).chefFen,fullChef);
+   const again=await service.ticket(users.customer,done.id,{reason:'结算后退一部分'});
+   await service.decideTicket(users.support,again.id,{action:'propose',refundFen:6000,decision:'结算后退服务费'});
+   await service.decideTicket(users.manager,again.id,{action:'approve'});
+   await service.decideTicket(users.finance,again.id,{action:'execute'});
+   row=await db.order.findUniqueOrThrow({where:{id:done.id}});
+   assert.equal(row.settlementStatus,'SETTLED');assert.equal(row.refundedFen,6000);
+   assert.equal((await db.ledgerEntry.findUniqueOrThrow({where:{reference:'recovery:'+again.id}})).amountFen,fullChef-nextChef);
+   assert.equal((await db.ledgerEntry.findUniqueOrThrow({where:{reference:'settlement:'+done.id}})).amountFen,-fullChef);
+  }finally{now=previous;}
  });
  await t.test('48h confirmation does not auto-charge balance; outbox deliveries deduplicate',async()=>{
   const q=await service.quote(users.customer,input(11)),o=await pay(q);await service.accept(users.chef0,o.id);
@@ -216,5 +255,74 @@ test('MVP PostgreSQL acceptance scenarios',async t=>{
   const first=await service.publishAgreement(users.operator,{kind:'USER_SERVICE',title:'测试用户协议',content:'第一版内容'}),second=await service.publishAgreement(users.operator,{kind:'USER_SERVICE',title:'测试用户协议',content:'第二版内容'});
   assert.equal(second.version,first.version+1);const agreements=await service.agreements('USER_SERVICE');assert.equal(agreements.length,1);assert.equal(agreements[0].version,second.version);
   assert((await service.opsUsers(users.operator)).some(u=>u.id===users.stranger.id));assert.equal(await db.auditEvent.count({where:{aggregateId:users.stranger.id,action:{startsWith:'USER_'}}}),2);
+ });
+ await t.test('SRS V1.0 rules: insurance gate, booking window, cancellation tiers, compensation settlement, IM masking',async()=>{
+  const live=await service.rules(db);
+  await service.publishRules(users.operator,{...live,srsVersion:undefined,settlementTrigger:undefined,commissionBase:undefined,insuranceRequired:undefined,commissionRate:0,reason:'切换到需求说明书 V1.0 规则'});
+  const rules=await service.rules(db);assert.equal(rules.srsVersion,'1.0');assert.equal(rules.settlementTrigger,'CONFIRM_DELAY');assert.equal(rules.insuranceRequired,true);
+  const at=(h:number)=>{const d=new Date(now.getTime()+h*3600000);d.setUTCMinutes(0,0,0);return d.toISOString();};
+  await assert.rejects(()=>service.quote(users.customer,input(2)),/不可预约/);
+  const policy=await service.upload(users.chef0,{mime:'image/png',base64:png});
+  await service.submitCertificate(users.chef0,{kind:'INSURANCE',assetId:policy.id,validUntil:new Date(now.getTime()+365*86400000).toISOString()});
+  await assert.rejects(()=>service.reviewCertificate(users.chef0,chefIds[0],{kind:'INSURANCE',action:'approve',reason:'自审'}));
+  await service.reviewCertificate(users.operator,chefIds[0],{kind:'INSURANCE',action:'approve',reason:'保单有效'});
+  assert((await db.chef.findUniqueOrThrow({where:{id:chefIds[0]}})).insuranceValidUntil);
+  assert((await service.chefs()).some(c=>c.id===chefIds[0]));assert(!(await service.chefs()).some(c=>c.id===chefIds[1]));
+  await assert.rejects(()=>service.quote(users.customer,input(0,{startsAt:new Date(Math.ceil((now.getTime()+3600000)/1800000)*1800000).toISOString()})),/预约时间/);
+
+  const free=await pay(await service.quote(users.customer,input(2)));
+  assert.equal(new Date(free.details.acceptanceDeadline).getTime()-now.getTime(),30*60000);
+  await service.accept(users.chef0,free.id);
+  assert.equal((await service.cancelPreview(users.customer,free.id)).tier,'FREE');
+  await service.cancel(users.customer,free.id,{reason:'提前两天取消'});
+  let row=await db.order.findUniqueOrThrow({where:{id:free.id}});assert.equal(row.refundedFen,row.receivedFen);assert.equal(row.settlementStatus,'INELIGIBLE');
+
+  const mid=await pay(await service.quote(users.customer,input(0,{startsAt:at(12)})),{paymentChoice:'FULL_PAYMENT'});
+  await service.accept(users.chef0,mid.id);
+  await service.messages(users.customer,mid.id,{body:'我们私下转账吧'});
+  assert.equal((await db.chatMessage.findFirstOrThrow({where:{orderId:mid.id}})).body,'我们******吧');
+  const preview=await service.cancelPreview(users.customer,mid.id);assert.deepEqual([preview.tier,preview.deductFen,preview.refundFen],['MID',9000,21000]);
+  await assert.rejects(()=>service.cancel(users.customer,mid.id,{reason:'临时有事',expectedDeductFen:0}),/重新确认/);
+  await service.cancel(users.customer,mid.id,{reason:'临时有事',expectedDeductFen:9000});
+  row=await db.order.findUniqueOrThrow({where:{id:mid.id}});assert.equal(row.refundedFen,21000);assert.equal(row.settlementStatus,'PENDING');assert.equal((row.details as any).cancelCompensationFen,9000);
+  const finance=new ChefFinanceService(db,()=>now);
+  assert.equal(await finance.autoSettle(),0);
+  const previous=now;now=new Date(now.getTime()+25*3600000);
+  assert.equal(await finance.autoSettle(),1);now=previous;
+  row=await db.order.findUniqueOrThrow({where:{id:mid.id}});assert.equal(row.settlementStatus,'SETTLED');assert.equal((row.details as any).settlement.chefFen,9000);
+  assert.equal((await db.ledgerEntry.aggregate({where:{orderId:mid.id},_sum:{amountFen:true}}))._sum.amountFen,0);
+
+  const late=await pay(await service.quote(users.customer,input(0,{startsAt:at(3)})),{paymentChoice:'FULL_PAYMENT'});
+  await service.accept(users.chef0,late.id);
+  const before=now;now=new Date(new Date(late.details.startsAt).getTime()-20*60000);
+  for(const action of['depart','arrive'])await service.fulfill(users.chef0,late.id,{action,evidence:'已到达'});
+  assert.deepEqual((({tier,deductFen})=>[tier,deductFen])(await service.cancelPreview(users.customer,late.id)),['ARRIVED',30000]);
+  await service.cancel(users.customer,late.id,{reason:'到达后取消'});now=before;
+  row=await db.order.findUniqueOrThrow({where:{id:late.id}});assert.equal(row.refundedFen,0);assert.equal((row.details as any).cancelCompensationFen,30000);
+
+  const chefCancel=await pay(await service.quote(users.customer,input(3)));await service.accept(users.chef0,chefCancel.id);
+  await assert.rejects(()=>service.cancel(users.chef0,chefCancel.id,{}),/取消原因/);
+  await service.cancel(users.chef0,chefCancel.id,{reason:'家中急事'});
+  row=await db.order.findUniqueOrThrow({where:{id:chefCancel.id}});assert.equal(row.refundedFen,row.receivedFen);
+  assert.equal(await db.chefPenalty.count({where:{chefId:chefIds[0],kind:'VIOLATION',reason:'接单后取消：家中急事'}}),1);
+ });
+ await t.test('SRS V1.0 accounts: agreement, password lockout and delayed deletion',async()=>{
+  await assert.rejects(()=>service.login({username:prefix+'_new',password:'TestingPassword2026!',displayName:'新用户'},true),/协议/);
+  const created=await service.login({username:prefix+'_new',password:'TestingPassword2026!',displayName:'新用户',agreed:true},true);
+  assert((await db.user.findUniqueOrThrow({where:{id:created.user.id}})).agreedAt);
+  for(let i=0;i<5;i++)await assert.rejects(()=>service.login({username:prefix+'_new',password:'wrong-password'}),/不正确/);
+  await assert.rejects(()=>service.login({username:prefix+'_new',password:'TestingPassword2026!'}),/30 分钟/);
+  const previous=now;now=new Date(now.getTime()+31*60000);
+  const back=await service.login({username:prefix+'_new',password:'TestingPassword2026!'});
+  const me=await service.session(back.token);
+  await assert.rejects(()=>service.requestDeletion(me,{}),/确认/);
+  const requested=await service.requestDeletion(me,{confirm:true});assert.equal(new Date(requested.effectiveAt).getTime()-now.getTime(),15*86400000);
+  await assert.rejects(()=>service.session(back.token));
+  await service.login({username:prefix+'_new',password:'TestingPassword2026!'});
+  assert.equal((await db.user.findUniqueOrThrow({where:{id:me.id}})).deletionRequestedAt,null);
+  await service.requestDeletion(me,{confirm:true});
+  now=new Date(now.getTime()+16*86400000);await service.tick();now=previous;
+  const gone=await db.user.findUniqueOrThrow({where:{id:me.id}});assert.equal(gone.status,'DELETED');assert.equal(gone.username,null);assert.equal(gone.passwordHash,null);
+  await assert.rejects(()=>service.requestDeletion(users.operator,{confirm:true}),/工作人员/);
  });
 });

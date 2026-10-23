@@ -3,6 +3,7 @@ import { PrismaClient, Prisma, User, Order } from '@prisma/client';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { ApiError, ensure, text, integer } from './errors';
 import { hashPassword, checkPassword, digest, encrypt, decrypt } from './security';
+import { DELETION_DELAY_DAYS, LOGIN_LOCK_MINUTES, LOGIN_MAX_FAILS, cancellation, insuranceOk, settlementEligibleAt, srs } from './policy';
 
 type Tx = Prisma.TransactionClient;
 type Data = Record<string, any>;
@@ -35,6 +36,7 @@ export class Service {
     const s = await this.db.appSession.findUnique({ where: { id: digest(token) } });
     ensure(s && s.expiresAt > this.clock(), 'UNAUTHORIZED', '登录已过期', 401);
     const u = await this.db.user.findUnique({ where: { id: s.userId } }); ensure(u, 'UNAUTHORIZED', '账号不存在', 401);
+    ensure(u.status !== 'DELETED', 'ACCOUNT_DELETED', '账号已注销', 403);
     ensure(u.status === 'ACTIVE', 'ACCOUNT_FROZEN', '账号已冻结，请联系客服', 403); return u;
   }
   async login(body: Data, register = false) {
@@ -42,28 +44,75 @@ export class Service {
     ensure(/^[a-zA-Z0-9_-]{3,40}$/.test(username), 'INVALID_INPUT', '账号须为3至40位字母、数字、下划线', 400);
     let user = await this.db.user.findUnique({ where: { username } });
     if (register) {
+      ensure(body.agreed === true, 'AGREEMENT_REQUIRED', '请阅读并同意用户服务协议和隐私政策', 400);
       ensure(password.length >= 10, 'WEAK_PASSWORD', '密码至少10位', 400);
       ensure(!user, 'USERNAME_TAKEN', '账号已存在');
-      try{user = await this.db.user.create({ data: { username, passwordHash: hashPassword(password), displayName: text(body.displayName, '昵称', 30), roles: ['USER'] } });}catch(e:any){if(e.code==='P2002')throw new ApiError(409,'USERNAME_TAKEN','账号已存在');throw e;}
-    } else ensure(user?.passwordHash && checkPassword(password, user.passwordHash), 'INVALID_CREDENTIALS', '账号或密码不正确', 401);
+      try{user = await this.db.user.create({ data: { username, passwordHash: hashPassword(password), displayName: text(body.displayName, '昵称', 30), roles: ['USER'], agreedAt: this.clock() } });}catch(e:any){if(e.code==='P2002')throw new ApiError(409,'USERNAME_TAKEN','账号已存在');throw e;}
+    } else {
+      ensure(!user?.lockedUntil || user.lockedUntil <= this.clock(), 'ACCOUNT_LOCKED', '密码错误次数过多，请 '+LOGIN_LOCK_MINUTES+' 分钟后再试', 423);
+      if (!user?.passwordHash || !checkPassword(password, user.passwordHash)) {
+        if (user) {
+          const fails = (user.lockedUntil ? 0 : user.failedLogins) + 1, locked = fails >= LOGIN_MAX_FAILS;
+          await this.db.user.update({ where: { id: user.id }, data: { failedLogins: locked ? 0 : fails, lockedUntil: locked ? new Date(this.clock().getTime() + LOGIN_LOCK_MINUTES * 60000) : null } });
+          await this.db.$transaction(tx => this.audit(tx, null, locked ? 'LOGIN_LOCKED' : 'LOGIN_FAILED', user!.id));
+        }
+        throw new ApiError(401, 'INVALID_CREDENTIALS', '账号或密码不正确');
+      }
+    }
     ensure(user?.status === 'ACTIVE', 'ACCOUNT_FROZEN', '账号已冻结，请联系客服', 403);
+    if (user.failedLogins || user.lockedUntil || user.deletionRequestedAt) {
+      if (user.deletionRequestedAt) await this.db.$transaction(tx => this.audit(tx, user!.id, 'ACCOUNT_DELETION_REVOKED', user!.id, { by: 'login' }));
+      user = await this.db.user.update({ where: { id: user.id }, data: { failedLogins: 0, lockedUntil: null, deletionRequestedAt: null } });
+    }
     const token = randomBytes(32).toString('hex');
     await this.db.appSession.create({ data: { id: digest(token), userId: user!.id, expiresAt: new Date(this.clock().getTime() + 24 * HOUR) } });
     return { token, user: this.publicUser(user!) };
   }
-  publicUser(user: User) { return { id: user.id, displayName: user.displayName, roles: user.roles, username: user.username, phoneBound:!!user.phoneVerifiedAt }; }
+  acceptMinutes(d: Data) { return d.mode === 'SELF' ? srs(d.rules)?.acceptTimeoutMinutes ?? 5 : d.rules.matchMinutes; }
+  publicUser(user: User) { return { id: user.id, displayName: user.displayName, roles: user.roles, username: user.username, phoneBound:!!user.phoneVerifiedAt, deletionRequestedAt: user.deletionRequestedAt }; }
   autoConfirmHours(order: Pick<Order,'ruleSnapshot'>) {
     const value=Number(obj(order.ruleSnapshot).autoConfirmHours);
     return Number.isInteger(value)&&value>=1&&value<=168?value:72;
   }
-  settlementEligibleAt(order: Pick<Order,'confirmedAt'|'reviewStatus'|'ruleSnapshot'>,legacyHoldHours=168) {
-    if(!order.confirmedAt)return null;
-    const rules=obj(order.ruleSnapshot);
-    if(rules.settlementTrigger!=='REVIEW_OR_EXPIRE')return new Date(order.confirmedAt.getTime()+legacyHoldHours*HOUR);
-    if(!['REVIEWED','EXPIRED'].includes(order.reviewStatus))return null;
-    const delay=Number(rules.settlementDelayHours??0);
+  settlementEligibleAt(order: Pick<Order,'confirmedAt'|'reviewStatus'|'ruleSnapshot'|'details'>,legacyHoldHours=168) {
+    const rules=obj(order.ruleSnapshot),d=obj(order.details);
+    if(d.cancelCompensationFen>0&&d.cancelledAt)return new Date(new Date(d.cancelledAt).getTime()+(Number(rules.settleDelayHours)||0)*HOUR);
+    const delay=Number(rules.settlementTrigger==='CONFIRM_DELAY'?rules.settleDelayHours:rules.settlementDelayHours??0);
     ensure(Number.isInteger(delay)&&delay>=0&&delay<=720,'FINANCE_CONFIG','结算延迟配置无效',503);
-    return new Date(order.confirmedAt.getTime()+delay*HOUR);
+    return settlementEligibleAt(order,legacyHoldHours);
+  }
+  /** SRS 3.1.6: deletion takes effect after a cooling-off period; logging in again revokes it. */
+  async requestDeletion(user: User, b: Data) {
+    ensure(b.confirm === true, 'CONFIRM_REQUIRED', '请确认已了解注销后果', 400);
+    ensure(user.roles.every(r => ['USER','CHEF'].includes(r)), 'STAFF_ACCOUNT', '工作人员账号请联系管理员处理', 403);
+    return this.transaction(async tx => {
+      const busy = await tx.order.count({ where: { customerId: user.id, OR: [{ contractStatus: { in: ['PENDING_PAYMENT','PENDING_ACCEPTANCE','ACCEPTED','PAYMENT_EXCEPTION'] } }, { aftersaleStatus: 'PROCESSING' }] } });
+      ensure(busy === 0, 'ORDERS_IN_PROGRESS', '存在进行中的订单或售后，完成后再申请注销');
+      const chef = await tx.chef.findUnique({ where: { userId: user.id } });
+      if (chef) {
+        ensure(await tx.order.count({ where: { acceptedChefId: chef.id, OR: [{ contractStatus: 'ACCEPTED' }, { settlementStatus: { in: ['PENDING','FROZEN','PROCESSING','AWAITING_CONFIRMATION'] } }, { aftersaleStatus: 'PROCESSING' }] } }) === 0, 'ORDERS_IN_PROGRESS', '存在待履约或待结算的订单，完成后再申请注销');
+        const balance = (await tx.chefWalletEntry.aggregate({ where: { chefId: chef.id }, _sum: { amountFen: true } }))._sum.amountFen ?? 0;
+        ensure(balance === 0, 'WALLET_NOT_EMPTY', '请先提现全部余额后再申请注销');
+        ensure(await tx.chefWithdrawal.count({ where: { chefId: chef.id, status: { notIn: ['SUCCESS','FAIL','CANCELLED','REJECTED'] } } }) === 0, 'WITHDRAW_IN_PROGRESS', '提现处理中，完成后再申请注销');
+      }
+      const at = this.clock();
+      await tx.user.update({ where: { id: user.id }, data: { deletionRequestedAt: at } });
+      await tx.appSession.deleteMany({ where: { userId: user.id } });
+      await this.audit(tx, user.id, 'ACCOUNT_DELETION_REQUESTED', user.id);
+      return { deletionRequestedAt: at, effectiveAt: new Date(at.getTime() + DELETION_DELAY_DAYS * 24 * HOUR) };
+    });
+  }
+  async anonymize(tx: Tx, u: User) {
+    await tx.user.update({ where: { id: u.id }, data: { username: null, passwordHash: null, openId: null, phone: null, phoneEncrypted: null, phoneVerifiedAt: null, displayName: '已注销用户', status: 'DELETED', deletionRequestedAt: null, failedLogins: 0, lockedUntil: null } });
+    await tx.address.updateMany({ where: { userId: u.id }, data: { encryptedText: null, maskedText: '已注销', latitude: null, longitude: null } });
+    await tx.appSession.deleteMany({ where: { userId: u.id } });
+    const chef = await tx.chef.findUnique({ where: { userId: u.id } });
+    if (chef) {
+      const { payoutName, payoutBank, payoutAccount, payoutAccountLast4, latitude, longitude, ...rest } = obj(chef.data);
+      await tx.chef.update({ where: { id: chef.id }, data: { status: 'CLOSED', acceptingOrders: false, data: { ...rest, closedAt: this.clock().toISOString() } } });
+      await tx.servicePackage.updateMany({ where: { chefId: chef.id }, data: { active: false } });
+    }
+    await this.audit(tx, null, 'ACCOUNT_ANONYMIZED', u.id);
   }
   async logout(token: string) { await this.db.appSession.deleteMany({ where: { id: digest(token) } }); return { ok: true }; }
   async addresses(user: User) {
@@ -95,8 +144,8 @@ export class Service {
     ensure(!located||(Number.isFinite(lat)&&Number.isFinite(lng)&&Math.abs(lat)<=90&&Math.abs(lng)<=180),'INVALID_LOCATION','位置无效',400);
     const sort=String(query.sort??'default');ensure(['default','price_asc','price_desc','distance'].includes(sort),'INVALID_SORT','排序方式无效',400);
     ensure(sort!=='distance'||located,'LOCATION_REQUIRED','请先选择位置',400);
-    const rules=await this.rules(this.db),regionCode=String(query.regionCode??'');
-    const result=rows.map(c=>{const d=obj(c.data),r=ratings.find(v=>v.chefId===c.id),distanceM=located?this.distance(lat,lng,d.latitude,d.longitude):null;
+    const rules=await this.rules(this.db),regionCode=String(query.regionCode??''),s=srs(rules);
+    const result=rows.filter(c=>insuranceOk(s,c.insuranceValidUntil,this.clock())).map(c=>{const d=obj(c.data),r=ratings.find(v=>v.chefId===c.id),distanceM=located?this.distance(lat,lng,d.latitude,d.longitude):null;
       return {id:c.id,name:c.user.displayName,status:c.status,healthValidUntil:c.healthValidUntil,serviceRadiusM:rules.radiusM??c.serviceRadiusM,cuisines:d.cuisines??[],bio:d.bio??'',regionCode:d.regionCode,packages:c.packages,rating:r?((r._avg.taste??0)+(r._avg.service??0)+(r._avg.punctuality??0))/3:null,reviewCount:r?._count._all??0,distanceM:Number.isFinite(distanceM)?distanceM:null};
     }).filter(c=>rules.regions.some((r:Data)=>r.active&&r.code===c.regionCode)&&(!regionCode||c.regionCode===regionCode)&&(!cuisine||cuisine==='全部'||c.cuisines.includes(cuisine))&&(!search||[c.name,c.bio,...c.cuisines,...c.packages.map(p=>p.name+' '+p.description)].join(' ').toLocaleLowerCase().includes(search))&&(!located||(c.distanceM!==null&&c.distanceM<=c.serviceRadiusM)));
     const price=(c:typeof result[number])=>c.packages.length?Math.min(...c.packages.map(p=>p.serviceFen)):Number.MAX_SAFE_INTEGER;
@@ -129,7 +178,14 @@ export class Service {
       ensure(b.agreement === true, 'AGREEMENT_REQUIRED', '请确认入驻协议和服务边界', 400);
       const data = { bio: text(b.bio, '自我介绍', 500), cuisines: b.cuisines, regionCode: text(b.regionCode, '片区'), latitude: Number(b.latitude), longitude: Number(b.longitude), healthAssetId: file.id, agreementAt: this.clock().toISOString() };
       ensure((!b.coordinateSystem || b.coordinateSystem === 'GCJ02') && Number.isFinite(data.latitude) && Number.isFinite(data.longitude) && data.latitude >= 27.8 && data.latitude <= 28.5 && data.longitude >= 112.5 && data.longitude <= 113.5, 'INVALID_LOCATION', '请选择长沙服务范围内的接单出发位置', 400); const rules = await this.rules(tx); ensure(rules.regions.some((r:Data)=>r.active&&r.code===data.regionCode),'REGION_CLOSED','该片区暂未开放');
-      const chef = await tx.chef.upsert({ where: { userId: user.id }, create: { userId: user.id, status: 'PENDING_REVIEW', healthValidUntil, data }, update: { status: 'PENDING_REVIEW', healthValidUntil, data } });
+      let insuranceValidUntil: Date | null = existing?.insuranceValidUntil ?? null, insuranceAssetId = obj(existing?.data).insuranceAssetId;
+      if (b.insuranceAssetId || srs(rules)?.insuranceRequired) {
+        const policyFile = await tx.fileAsset.findUnique({ where: { id: text(b.insuranceAssetId, '意外险保单') } }); ensure(policyFile?.userId === user.id, 'INVALID_EVIDENCE', '请上传本人意外险保单', 400);
+        insuranceValidUntil = new Date(text(b.insuranceValidUntil, '保单有效期')); ensure(Number.isFinite(insuranceValidUntil.getTime()) && insuranceValidUntil > this.clock(), 'EXPIRED_INSURANCE', '意外险已过期', 400);
+        insuranceAssetId = policyFile.id;
+      }
+      const withInsurance = { ...data, ...(insuranceAssetId ? { insuranceAssetId } : {}) };
+      const chef = await tx.chef.upsert({ where: { userId: user.id }, create: { userId: user.id, status: 'PENDING_REVIEW', healthValidUntil, insuranceValidUntil, data: withInsurance }, update: { status: 'PENDING_REVIEW', healthValidUntil, insuranceValidUntil, data: withInsurance } });
       await tx.user.update({ where: { id: user.id }, data: { roles: { set: [...new Set([...user.roles, 'CHEF' as const])] } } });
       await this.audit(tx, user.id, 'CHEF_APPLIED', chef.id); return chef;
     });
@@ -161,6 +217,7 @@ export class Service {
     if (!c || !c.acceptingOrders || !['APPROVED','TRIAL'].includes(c.status) || !c.healthValidUntil || c.healthValidUntil <= new Date(d.endsAt)) return false;
     const live = await this.rules(tx);
     if (!live.regions.some((r: Data) => r.code === d.regionCode && r.active)) return false;
+    if (!insuranceOk(srs(live), c.insuranceValidUntil, new Date(d.endsAt))) return false;
     const cd = obj(c.data);
     if (![cd.latitude,cd.longitude,d.latitude,d.longitude].every(Number.isFinite)) return false;
     if (cd.regionCode !== d.regionCode || (d.cuisine && !cd.cuisines?.includes(d.cuisine))) return false;
@@ -179,8 +236,9 @@ export class Service {
       ensure(rules.regions.some((r: Data) => r.code === a.regionCode && r.active), 'REGION_CLOSED', '片区暂停服务');
       const startsAt = new Date(text(b.startsAt, '上门时间')), hours = integer(b.hours ?? 2, '服务时长', 1, 8);
       const advance = startsAt.getTime() - this.clock().getTime();
-      const urgent = b.urgent === true;
-      ensure(Number.isFinite(advance) && advance <= 30 * 24 * HOUR && (urgent ? advance >= rules.urgentMinMinutes * 60000 && advance <= 2 * HOUR : advance >= 24 * HOUR), 'BOOKING_WINDOW', '普通预约提前24小时至30天；急单按已发布最小提前量至2小时', 400);
+      const urgent = b.urgent === true, s = srs(rules);
+      if (s) ensure(Number.isFinite(advance) && advance <= s.maxAdvanceDays * 24 * HOUR && (urgent ? advance >= rules.urgentMinMinutes * 60000 && advance <= s.minAdvanceHours * HOUR : advance >= s.minAdvanceHours * HOUR), 'BOOKING_WINDOW', '预约时间须在 ' + s.minAdvanceHours + ' 小时后至 ' + s.maxAdvanceDays + ' 天内', 400);
+      else ensure(Number.isFinite(advance) && advance <= 30 * 24 * HOUR && (urgent ? advance >= rules.urgentMinMinutes * 60000 && advance <= 2 * HOUR : advance >= 24 * HOUR), 'BOOKING_WINDOW', '普通预约提前24小时至30天；急单按已发布最小提前量至2小时', 400);
       ensure(startsAt.getMinutes() % 30 === 0 && startsAt.getSeconds() === 0, 'TIME_GRANULARITY', '上门时间须为整点或半点', 400);
       const endsAt = new Date(startsAt.getTime() + hours * HOUR);
       ensure(['CUSTOMER','CHEF'].includes(b.ingredientMode), 'INVALID_INGREDIENT_MODE', '请选择食材方式', 400);
@@ -197,7 +255,7 @@ export class Service {
       ensure(provider&&providerData.regionCode===a.regionCode&&[providerData.latitude,providerData.longitude].every(Number.isFinite)&&this.distance(details.latitude,details.longitude,providerData.latitude,providerData.longitude)<=details.radiusM,'CHEF_OUT_OF_RANGE','该厨师不服务所选地址，请更换地址或厨师');
       ensure(await this.available(tx, pkg.chefId, details), 'CHEF_UNAVAILABLE', '厨师在所选时间不可预约，请检查档期、服务时长或更换厨师');
       const totalFen = pkg.serviceFen + ingredientFen - details.discountFen, depositFen = Math.round(totalFen * .3);
-      const q = await tx.quote.create({ data: { customerId: user.id, chefId: pkg.chefId, packageId: pkg.id, totalFen, depositFen, balanceFen: totalFen - depositFen, ruleVersion: rules.id, expiresAt: new Date(this.clock().getTime() + 30 * 60000), details } });
+      const q = await tx.quote.create({ data: { customerId: user.id, chefId: pkg.chefId, packageId: pkg.id, totalFen, depositFen, balanceFen: totalFen - depositFen, ruleVersion: rules.id, expiresAt: new Date(this.clock().getTime() + (s?.payTimeoutMinutes ?? 30) * 60000), details } });
       if (details.mode === 'SELF') await tx.bookingLock.create({ data: { chefId: pkg.chefId, quoteId: q.id, startsAt: new Date(startsAt.getTime()-HOUR), endsAt: new Date(endsAt.getTime()+HOUR), expiresAt: q.expiresAt } });
       await this.audit(tx, user.id, 'QUOTE_CREATED', q.id, { totalFen, mode: details.mode });
       return { ...q, details: { ...details, encryptedAddress: undefined } };
@@ -223,7 +281,7 @@ export class Service {
       if (d.mode === 'SELF') ensure(await this.available(tx, q.chefId, d, q.id), 'SCHEDULE_CONFLICT', '档期冲突或厨师资质失效');
       if (d.couponId) { const c = await tx.coupon.findUnique({ where: { id: d.couponId } }); ensure(c?.status === 'AVAILABLE' && c.expiresAt > this.clock(), 'COUPON_UNAVAILABLE', '优惠券已被使用或过期'); }
       const amountFen = choice === 'DEPOSIT' ? q.depositFen : q.totalFen;
-      const order = await tx.order.create({ data: { quoteId: q.id, customerId: user.id, addressId: d.addressId, acceptedChefId: null, totalFen: q.totalFen, depositFen: q.depositFen, balanceFen: q.totalFen-amountFen, receivedFen: amountFen, contractStatus: 'PENDING_ACCEPTANCE', paymentStatus: choice === 'DEPOSIT' ? 'DEPOSIT_PAID' : 'FULLY_PAID', ruleSnapshot: d.rules, details: { ...d, selectedChefId: d.mode === 'SELF' ? q.chefId : null, initialChoice: choice, acceptanceDeadline: new Date(this.clock().getTime() + (d.mode === 'SELF' ? 5 : d.rules.matchMinutes) * 60000).toISOString() } } });
+      const order = await tx.order.create({ data: { quoteId: q.id, customerId: user.id, addressId: d.addressId, acceptedChefId: null, totalFen: q.totalFen, depositFen: q.depositFen, balanceFen: q.totalFen-amountFen, receivedFen: amountFen, contractStatus: 'PENDING_ACCEPTANCE', paymentStatus: choice === 'DEPOSIT' ? 'DEPOSIT_PAID' : 'FULLY_PAID', ruleSnapshot: d.rules, details: { ...d, selectedChefId: d.mode === 'SELF' ? q.chefId : null, initialChoice: choice, acceptanceDeadline: new Date(this.clock().getTime() + this.acceptMinutes(d) * 60000).toISOString() } } });
       if (d.couponId) await tx.coupon.update({ where: { id: d.couponId }, data: { status: 'USED', orderId: order.id } });
       await this.payment(tx, order, amountFen, choice, key);
       await tx.quote.update({ where: { id }, data: { status: 'PAID' } });
@@ -287,6 +345,7 @@ export class Service {
   async refund(tx: Tx, o: Order, amountFen: number, key: string) {
     const old = await tx.ledgerEntry.findUnique({ where: { reference: key } }); if (old) return;
     ensure(amountFen >= 0 && amountFen <= o.receivedFen-o.refundedFen, 'INVALID_REFUND', '退款不能超过净实收');
+    if (!amountFen && o.receivedFen > o.refundedFen) return;
     if (amountFen) {
       ensure(process.env.APP_MODE==='sandbox','REFUND_UNAVAILABLE','退款渠道尚未开通',503);
       await tx.paymentRequest.create({ data: { orderId: o.id, amountFen, kind: 'REFUND', status: 'SUCCEEDED', provider: 'sandbox', providerRef: 'sandbox_'+randomUUID(), idempotencyKey: key } });
@@ -294,7 +353,7 @@ export class Service {
     }
     await tx.order.update({ where: { id: o.id }, data: { refundedFen: o.refundedFen+amountFen, paymentStatus: o.refundedFen+amountFen === o.receivedFen ? 'FULLY_REFUNDED' : 'PARTIALLY_REFUNDED' } });
   }
-  async cancelTx(tx: Tx, o: Order, actorId: string | null, reason: string) {
+  async cancelTx(tx: Tx, o: Order, actorId: string | null, reason: string, deductFen = 0) {
     if (o.contractStatus === 'CANCELLED') return o;
     if(o.contractStatus==='PENDING_PAYMENT'){
       const updated=await tx.order.update({where:{id:o.id},data:{contractStatus:'CANCELLED',fulfillmentStatus:'STOPPED',balanceFen:0}});
@@ -302,13 +361,33 @@ export class Service {
       await this.audit(tx,actorId,'UNPAID_ORDER_CANCELLED',o.id,{reason});return updated;
     }
     ensure(['PENDING_ACCEPTANCE','ACCEPTED'].includes(o.contractStatus), 'NOT_CANCELLABLE', '此状态不可直接取消');
-    await this.refund(tx,o,o.receivedFen-o.refundedFen,'cancel:'+o.id);
-    const updated = await tx.order.update({ where: { id: o.id }, data: { contractStatus: 'CANCELLED', fulfillmentStatus: 'STOPPED', feeStatus: 'SETTLED', settlementStatus: 'INELIGIBLE', balanceFen: 0 } });
+    const net = o.receivedFen-o.refundedFen, compensate = deductFen > 0 && !!o.acceptedChefId;
+    ensure(Number.isSafeInteger(deductFen) && deductFen >= 0 && deductFen <= net, 'INVALID_REFUND', '取消扣费超出实收');
+    await this.refund(tx,o,net-(compensate?deductFen:0),'cancel:'+o.id);
+    const fresh = await tx.order.findUniqueOrThrow({ where: { id: o.id } });
+    const updated = await tx.order.update({ where: { id: o.id }, data: { contractStatus: 'CANCELLED', fulfillmentStatus: 'STOPPED', feeStatus: 'SETTLED', settlementStatus: compensate ? 'PENDING' : 'INELIGIBLE', balanceFen: 0, ...(compensate ? { details: { ...obj(fresh.details), cancelCompensationFen: deductFen, cancelledAt: this.clock().toISOString() } } : {}) } });
     await tx.bookingLock.deleteMany({ where: { orderId: o.id } });
     await tx.chefOrder.updateMany({ where: { orderId: o.id }, data: { status: 'EXPIRED' } });
     await tx.coupon.updateMany({ where: { orderId: o.id }, data: { status: 'AVAILABLE', orderId: null } });
     await tx.insurancePolicy.updateMany({ where: { orderId: o.id }, data: { status: 'SANDBOX_CANCELLED' } });
-    await this.audit(tx,actorId,'ORDER_CANCELLED',o.id,{reason}); await this.event(tx,process.env.APP_MODE==='sandbox'?'订单已取消，沙箱退款完成':'订单已取消，已收款项将原路退回',updated); return updated;
+    await this.audit(tx,actorId,'ORDER_CANCELLED',o.id,{reason,deductFen:compensate?deductFen:0});
+    await this.event(tx,compensate?'订单已取消，按取消规则扣除 '+(deductFen/100).toFixed(2)+' 元补偿厨师，其余款项原路退回':process.env.APP_MODE==='sandbox'?'订单已取消，沙箱退款完成':'订单已取消，已收款项将原路退回',updated,compensate&&o.acceptedChefId?[(await tx.chef.findUniqueOrThrow({where:{id:o.acceptedChefId}})).userId]:[]); return updated;
+  }
+  /** Customer cancellation terms under the order's rule snapshot; null when the snapshot predates SRS rules. */
+  cancelTerms(o: Order) {
+    const s = srs(o.ruleSnapshot), d = obj(o.details);
+    if (!s || !['PENDING_ACCEPTANCE','ACCEPTED'].includes(o.contractStatus)) return null;
+    return cancellation({ accepted: o.contractStatus === 'ACCEPTED', arrived: o.fulfillmentStatus === 'ARRIVED', startsAt: new Date(d.startsAt), now: this.clock(), baseFen: Number(d.serviceFen) || 0, netFen: o.receivedFen-o.refundedFen, rules: s });
+  }
+  async cancelPreview(user: User, id: string) {
+    return this.transaction(async tx => {
+      const o = await this.authorizedOrder(tx,user,id); ensure(o.customerId === user.id, 'FORBIDDEN', '仅订单用户可查看取消费用', 403);
+      ensure(!['SERVING','AWAITING_CONFIRMATION','COMPLETED'].includes(o.fulfillmentStatus) && ['PENDING_PAYMENT','PENDING_ACCEPTANCE','ACCEPTED'].includes(o.contractStatus), 'NOT_CANCELLABLE', '当前状态不可取消，请申请售后');
+      const net = o.receivedFen-o.refundedFen, terms = this.cancelTerms(o);
+      if (terms) return { ...terms, netFen: net, rules: 'SRS_V1' };
+      const legacyOk = o.contractStatus !== 'ACCEPTED' || (new Date(obj(o.details).startsAt).getTime()-this.clock().getTime() >= 24*HOUR && obj(o.details).initialChoice === 'DEPOSIT');
+      return { tier: legacyOk ? 'FREE' : 'AFTERSALE', ratio: 0, deductFen: 0, refundFen: legacyOk ? net : 0, netFen: net, rules: 'LEGACY' };
+    });
   }
   async cancel(user: User,id: string,b: Data) {
     return this.transaction(async tx => {
@@ -316,8 +395,24 @@ export class Service {
       const own = o.customerId === user.id, assigned = c?.id === o.acceptedChefId || c?.id === d.selectedChefId;
       ensure(own || assigned, 'FORBIDDEN', '仅交易双方可取消；运营请走售后审批',403);
       ensure(!['SERVING','AWAITING_CONFIRMATION','COMPLETED'].includes(o.fulfillmentStatus), 'AFTERSALE_REQUIRED', '已开始服务，请申请售后');
-      if (own && o.contractStatus === 'ACCEPTED') ensure(new Date(d.startsAt).getTime()-this.clock().getTime() >= 24*HOUR && d.initialChoice === 'DEPOSIT', 'RULE_PENDING', '此取消场景收费规则尚未发布，请提交售后工单');
-      const result = await this.cancelTx(tx,o,user.id,text(b.reason ?? '用户取消','取消原因',300)); return this.viewOrder(tx,user,result);
+      const s = srs(o.ruleSnapshot);
+      if (own) {
+        const terms = this.cancelTerms(o);
+        if (terms) {
+          if (b.expectedDeductFen !== undefined) ensure(b.expectedDeductFen === terms.deductFen, 'CANCEL_TERMS_CHANGED', '取消费用已变化，请重新确认', 409);
+          const result = await this.cancelTx(tx,o,user.id,text(b.reason ?? '用户取消','取消原因',300),terms.deductFen);
+          return this.viewOrder(tx,user,result);
+        }
+        if (o.contractStatus === 'ACCEPTED') ensure(new Date(d.startsAt).getTime()-this.clock().getTime() >= 24*HOUR && d.initialChoice === 'DEPOSIT', 'RULE_PENDING', '此取消场景收费规则尚未发布，请提交售后工单');
+        const result = await this.cancelTx(tx,o,user.id,text(b.reason ?? '用户取消','取消原因',300)); return this.viewOrder(tx,user,result);
+      }
+      const reason = s ? text(b.reason,'取消原因',300) : text(b.reason ?? '厨师取消','取消原因',300);
+      const result = await this.cancelTx(tx,o,user.id,reason);
+      if (s && c && o.contractStatus === 'ACCEPTED') {
+        await tx.chefPenalty.create({ data: { chefId: c.id, kind: 'VIOLATION', reason: '接单后取消：' + reason, createdBy: user.id } });
+        await this.audit(tx,user.id,'CHEF_CANCEL_VIOLATION',o.id,{ chefId: c.id });
+      }
+      return this.viewOrder(tx,user,result);
     });
   }
   async fulfill(user: User,id: string,b: Data) {
@@ -388,7 +483,17 @@ export class Service {
       await tx.order.updateMany({where:{reviewStatus:'OPEN',confirmedAt:{lt:new Date(this.clock().getTime()-7*24*HOUR)}},data:{reviewStatus:'EXPIRED'}});
       const healthDue=await tx.chef.findMany({where:{healthValidUntil:{gt:this.clock(),lte:new Date(this.clock().getTime()+30*24*HOUR)},status:{in:['TRIAL','APPROVED']}}});
       for(const chef of healthDue){const days=Math.max(1,Math.ceil((chef.healthValidUntil!.getTime()-this.clock().getTime())/(24*HOUR))),bucket=days<=7?7:30;await tx.notification.upsert({where:{id:`health:${chef.id}:${chef.healthValidUntil!.toISOString()}:${bucket}`},create:{id:`health:${chef.id}:${chef.healthValidUntil!.toISOString()}:${bucket}`,userId:chef.userId,body:`健康证将在${days}天内到期，请及时补充新材料`},update:{}});}
-      await tx.chef.updateMany({where:{healthValidUntil:{lte:this.clock()},acceptingOrders:true},data:{acceptingOrders:false,status:'SUSPENDED'}});
+      for(const chef of await tx.chef.findMany({where:{healthValidUntil:{lte:this.clock()},acceptingOrders:true}})){
+        await tx.chef.update({where:{id:chef.id},data:{acceptingOrders:false,status:'SUSPENDED',data:{...obj(chef.data),suspendedReason:'HEALTH_EXPIRED',statusBeforeSuspend:['TRIAL','APPROVED'].includes(chef.status)?chef.status:obj(chef.data).statusBeforeSuspend}}});
+        await tx.notification.create({data:{userId:chef.userId,body:'健康证已过期，接单已暂停；上传新健康证并通过审核后自动恢复'}});
+      }
+      const live=srs(await this.rules(tx));
+      if(live?.insuranceRequired){
+        const insuranceDue=await tx.chef.findMany({where:{insuranceValidUntil:{gt:new Date(this.clock().getTime()-live.insuranceGraceDays*24*HOUR),lte:new Date(this.clock().getTime()+30*24*HOUR)},status:{in:['TRIAL','APPROVED']}}});
+        for(const chef of insuranceDue){const expiredAlready=chef.insuranceValidUntil!<=this.clock(),id=`insurance:${chef.id}:${chef.insuranceValidUntil!.toISOString()}:${expiredAlready?'grace':'due'}`;await tx.notification.upsert({where:{id},create:{id,userId:chef.userId,body:expiredAlready?`意外险已到期，${live.insuranceGraceDays}天缓冲期结束后将无法接单，请尽快上传新保单`:'意外险将在30天内到期，请及时续保并上传保单'},update:{}});}
+      }
+      const deletions=await tx.user.findMany({where:{deletionRequestedAt:{lte:new Date(this.clock().getTime()-DELETION_DELAY_DAYS*24*HOUR)},status:'ACTIVE'}});
+      for(const u of deletions)await this.anonymize(tx,u);
       const events=await tx.outboxEvent.findMany({where:{publishedAt:null},orderBy:{occurredAt:'asc'},take:100});
       for(const e of events){ const p=obj(e.payload); for(const userId of p.recipients??[])await tx.notification.upsert({where:{id:e.id+':'+userId},create:{id:e.id+':'+userId,userId,orderId:e.aggregateId,body:p.body??e.eventType},update:{}});await tx.outboxEvent.update({where:{id:e.id},data:{publishedAt:this.clock(),attempts:{increment:1}}}); }
       return {expired,confirmed,published:events.length};

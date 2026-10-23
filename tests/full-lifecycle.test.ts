@@ -49,7 +49,7 @@ test('full local lifecycle: chef apply, admin review, customer book, accept, ful
   });
 
   // 1. Chef registers and applies
-  const chefLogin = await svc.login({username: prefix + '_chef', password, displayName: '全链路厨师'}, true);
+  const chefLogin = await svc.login({username: prefix + '_chef', password, displayName: '全链路厨师', agreed: true}, true);
   users.chef = await svc.session(chefLogin.token);
   const health = await svc.upload(users.chef, {base64: png, mime: 'image/png'});
   const pending = await svc.applyChef(users.chef, {
@@ -91,7 +91,7 @@ test('full local lifecycle: chef apply, admin review, customer book, accept, ful
   assert.equal(discovered[0].id, pending.id);
 
   // 4. Customer registers, locates (coordinates), saves address, quotes and pays
-  const customerLogin = await svc.login({username: prefix + '_customer', password, displayName: '全链路用户'}, true);
+  const customerLogin = await svc.login({username: prefix + '_customer', password, displayName: '全链路用户', agreed: true}, true);
   users.customer = await svc.session(customerLogin.token);
   const address = await svc.address(users.customer, {
     label: '测试家',

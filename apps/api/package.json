@@ -6,7 +6,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx src/store.test.ts"
+    "test": "tsx src/store.test.ts && tsx --test src/policy.test.ts"
   },
   "dependencies": {
     "@home-chef/domain": "workspace:*",

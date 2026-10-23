@@ -83,7 +83,7 @@ export class PaymentService extends MvpService {
    if(p.kind==='ADDITIONAL')o=await tx.order.update({where:{id:o.id},data:{totalFen:beforePayment.totalFen+p.amountFen,balanceFen:beforePayment.balanceFen,paymentStatus:beforePayment.balanceFen>0?'DEPOSIT_PAID':'FULLY_PAID',details:{...d,ingredientFen:meta.ingredientFen,pendingChange:null}}});
    else if(p.kind==='BALANCE')o=await tx.order.update({where:{id:o.id},data:{balanceFen:0,feeStatus:'SETTLED',settlementStatus:o.confirmedAt?'PENDING':o.settlementStatus}});
    else{
-    const q=await tx.quote.findUniqueOrThrow({where:{id:o.quoteId}}),deadline=new Date(this.clock().getTime()+(d.mode==='SELF'?5:d.rules.matchMinutes)*60000);
+    const q=await tx.quote.findUniqueOrThrow({where:{id:o.quoteId}}),deadline=new Date(this.clock().getTime()+this.acceptMinutes(d)*60000);
     o=await tx.order.update({where:{id:o.id},data:{contractStatus:'PENDING_ACCEPTANCE',details:{...d,initialChoice:p.kind,acceptanceDeadline:deadline.toISOString()}}});
     if(coupon)await tx.coupon.update({where:{id:coupon.id},data:{status:'USED',orderId:o.id}});
     await tx.quote.update({where:{id:o.quoteId},data:{status:'PAID'}});

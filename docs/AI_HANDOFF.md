@@ -60,7 +60,8 @@ bash scripts/pnpm.sh db:migrate
 | 入驻审核、套餐、改约、售后、文件、评价 | apps/api/src/support.ts |
 | 微信手机号登录、UID/手机号绑定 | apps/api/src/wechat-auth.ts；详见 wechat-login.md |
 | 用户支付/退款/采购补款/查单 | apps/api/src/payments.ts |
-| 结算、余额、提现、分账、财务权限 | apps/api/src/chef-finance.ts |
+| 结算、余额、提现、分账、财务权限、自动结算 | apps/api/src/chef-finance.ts |
+| V1.0 规则参数与纯函数（取消阶梯、结算时间、佣金基数、提现限制、保险缓冲、IM R001–R007、出口手机号脱敏） | apps/api/src/policy.ts；单测 policy.test.ts |
 | 微信 APIv3 签名/验签/解密/OpenID | apps/api/src/wechat-pay.ts |
 | 数据模型 / 迁移 / 业务初始化 | prisma/schema.prisma / db/migrations / prisma/bootstrap.ts |
 | 队列与定时任务 | apps/worker/src/main.ts；每5秒调用受内部密钥保护的 /internal/tick |
@@ -73,6 +74,8 @@ bash scripts/pnpm.sh db:migrate
 | 部署与发布检查 | deploy/、scripts/check-release.ts、scripts/configure-wechat.mjs、scripts/build-wechat.sh |
 
 当前业务服务继承链：`Service → MvpService → PaymentService → ChefFinanceService`，main.ts 实例化最后一个。修改基类时检查子类 override；看到 sandbox 方法不能直接推断实际业务在使用它。
+
+V1.0 规则（2026-10-23）：只有已发布规则含 `srsVersion:'1.0'` 时生效，按订单 `ruleSnapshot` 判断，`srs(rules)` 返回 null 即旧口径。发布接口 `POST /ops/rules` 经 `srsInput` 校验参数。新增路由：`POST /me/deletion`（注销申请）、`GET /orders/:id/cancel-preview`（取消扣费预览，取消时可带 `expectedDeductFen` 防规则变化）、`POST /chef/certificates`（健康证/意外险续期提交）、`POST /ops/chefs/:id/certificates`（审核员审批）。worker tick 新增自动结算、证照到期停单/提醒、注销到期匿名化。迁移 `202610230001_srs_v1_rules`。
 
 ## 交易不变量
 
@@ -102,7 +105,7 @@ bash scripts/pnpm.sh build
 
 | 命令 | 实际覆盖 / 注意事项 |
 |---|---|
-| typecheck / test | 类型和各包单元测试，不等于完整业务验收 |
+| typecheck / test | 类型和各包单元测试，不等于完整业务验收；API 的 test 含 policy.test.ts |
 | test:wechat | 先业务夹具，再真实支付代码；隔离库 home_chef_test_wechat、测试密钥和模拟微信响应 |
 | test:integration | home_chef_test 历史 sandbox 业务集成：履约、费用、售后、权限、审计等 |
 | test-full-lifecycle.sh | 隔离库单测：厨师申请→审核→用户定位下单→接单→履约→确认→评价→结算；沙箱付款，非微信真收、非 UI |

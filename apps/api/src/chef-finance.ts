@@ -4,12 +4,13 @@ import {PaymentService} from './payments';
 import {obj,HOUR} from './service';
 import {ApiError,ensure,text,integer} from './errors';
 import {encrypt,decrypt} from './security';
+import {commissionFen,srs,withdrawalCheck} from './policy';
 type Tx=Prisma.TransactionClient;
 const ACTIVE=['REQUESTED','APPROVED','PROCESSING','ACCEPTED','WAIT_USER_CONFIRM','TRANSFERING','CANCELING'];
 export class ChefFinanceService extends PaymentService {
  override validatePayoutMode(d:any,mode:string){
   if(mode!=='PROFITSHARING')return;
-  const ratio=Number(process.env.WECHAT_PROFITSHARING_MAX_RATIO),total=d.serviceFen+d.ingredientFen-(d.discountFen??0),commission=Math.round(d.serviceFen*d.rules.commissionRate);
+  const ratio=Number(process.env.WECHAT_PROFITSHARING_MAX_RATIO),total=d.serviceFen+d.ingredientFen-(d.discountFen??0),commission=commissionFen(d.rules,d.serviceFen,total);
   ensure(process.env.WECHAT_PROFITSHARING_ENABLED==='true'&&ratio>0&&ratio<=1,'PROFITSHARING_CONFIG','微信分账权限及比例尚未配置',503);
   ensure(!d.discountFen,'SUBSIDY_UNSUPPORTED','微信直接分账暂不支持平台补贴，请取消优惠券后重新下单');
   ensure(Number.isSafeInteger(total)&&total>0&&(total-commission)/total<=ratio,'PROFITSHARING_LIMIT','服务收入分配超过商户获批的分账比例，暂不能付款');
@@ -34,22 +35,21 @@ export class ChefFinanceService extends PaymentService {
  safeWithdrawal(w:ChefWithdrawal){const m=obj(w.metadata);return {id:w.id,chefId:w.chefId,userId:w.userId,amountFen:w.amountFen,status:w.status,payoutMode:m.payoutMode??'WECHAT',createdAt:w.createdAt,updatedAt:w.updatedAt,reason:m.reason??m.failReason??null,receipt:m.receipt??null};}
  override async settle(user:User,id:string):Promise<any>{
   if(process.env.APP_MODE==='sandbox')return super.settle(user,id);this.role(user,'FINANCE');
-  return this.transaction(async tx=>{
+  return this.transaction(tx=>this.settleTx(tx,id,user.id));
+ }
+ /** actorId null means the timer settled it under a CONFIRM_DELAY rule snapshot. */
+ async settleTx(tx:Tx,id:string,actorId:string|null){
    const old=await tx.chefSettlement.findUnique({where:{orderId:id}});if(old)return old;
-   const o=await tx.order.findUnique({where:{id}});ensure(o?.acceptedChefId,'NOT_FOUND','订单或厨师不存在',404);const d=obj(o.details);
-   ensure(o.settlementStatus==='PENDING'&&o.feeStatus==='SETTLED'&&['NONE','CLOSED'].includes(o.aftersaleStatus)&&o.contractStatus==='FULFILLED'&&o.balanceFen===0&&o.confirmedAt,'SETTLEMENT_BLOCKED','订单未完成、费用未结清或存在争议');
-   const eligibleAt=this.settlementEligibleAt(o,this.holdHours());ensure(eligibleAt&&eligibleAt<=this.clock(),'SETTLEMENT_HOLD',obj(o.ruleSnapshot).settlementTrigger==='REVIEW_OR_EXPIRE'?'订单需等待评价完成或评价期结束':'订单仍在售后保护期');
-   ensure(!d.adjudicated&&!d.pendingChange,'ALLOCATION_PENDING','裁定或变更订单需要单独确认分配');
-   ensure(!await tx.serviceTicket.findFirst({where:{orderId:id,status:{not:'CLOSED'}}}),'SETTLEMENT_BLOCKED','订单存在未完结售后');
-   const payments=await tx.paymentRequest.findMany({where:{orderId:id}});ensure(!payments.some(p=>p.kind==='REFUND'&&p.status!=='SUCCEEDED'),'REFUND_PENDING','请等待退款确认完成');
-   const captures=payments.filter(p=>p.kind!=='REFUND'&&p.provider==='wechat'&&p.status==='SUCCEEDED');const net=o.receivedFen-o.refundedFen;
+   const o=await tx.order.findUnique({where:{id}});ensure(o?.acceptedChefId,'NOT_FOUND','订单或厨师不存在',404);
+   const {d,net,rate,commissionFen,subsidyFen,chefFen,cancelled}=await this.settlementAllocation(tx,o,this.holdHours());
+   const payments=await tx.paymentRequest.findMany({where:{orderId:id}});
+   const captures=payments.filter(p=>p.kind!=='REFUND'&&p.provider==='wechat'&&p.status==='SUCCEEDED');
    ensure(captures.reduce((s,p)=>s+p.amountFen,0)===o.receivedFen&&net>0,'FUNDS_MISMATCH','实收资金与微信账本不一致');
-   const rate=obj(o.ruleSnapshot).commissionRate;ensure(Number.isFinite(rate)&&rate>=0&&rate<1&&Number.isSafeInteger(d.serviceFen),'INVALID_RATE','结算规则快照无效');
-   const commissionFen=Math.round(d.serviceFen*rate),subsidyFen=d.discountFen??0,chefFen=net+subsidyFen-commissionFen;ensure(Number.isSafeInteger(chefFen)&&chefFen>=0&&Number.isSafeInteger(subsidyFen)&&subsidyFen>=0,'INVALID_ALLOCATION','结算金额异常');
-   const mode=d.payoutMode??'TRANSFER';ensure(['TRANSFER','PROFITSHARING'].includes(mode),'FINANCE_CONFIG','结算方式无效');const chef=await tx.chef.findUniqueOrThrow({where:{id:o.acceptedChefId}});ensure(chef.userId!==user.id,'SELF_APPROVAL','不可结算本人订单');
+   const mode=cancelled?'TRANSFER':d.payoutMode??'TRANSFER';ensure(['TRANSFER','PROFITSHARING'].includes(mode),'FINANCE_CONFIG','结算方式无效');ensure(actorId||mode==='TRANSFER','MANUAL_SETTLEMENT','分账订单需财务手动结算');
+   const chef=await tx.chef.findUniqueOrThrow({where:{id:o.acceptedChefId}});ensure(chef.userId!==actorId,'SELF_APPROVAL','不可结算本人订单');
    const recipient=await tx.user.findUniqueOrThrow({where:{id:chef.userId}});
    if(mode==='PROFITSHARING'){this.gateway();ensure(process.env.WECHAT_PROFITSHARING_ENABLED==='true'&&recipient.openId&&obj(chef.data).payoutName&&obj(chef.data).payoutConsentAt,'PROFITSHARING_CONFIG','请开通分账并由厨师绑定实名收款资料');ensure(subsidyFen===0,'SUBSIDY_UNSUPPORTED','含平台补贴的订单应使用余额提现模式');ensure(captures.every(p=>obj(p.rawEvent).profitSharing===true),'PROFITSHARING_CONFIG','该订单未按分账模式收款');}
-   const settlement=await tx.chefSettlement.create({data:{orderId:id,chefId:chef.id,mode,status:mode==='TRANSFER'?'AVAILABLE':'PROCESSING',chefFen,commissionFen,subsidyFen,snapshot:{netFen:net,serviceFen:d.serviceFen,rate,approvedBy:user.id,paymentIds:captures.map(p=>p.id)}}});
+   const settlement=await tx.chefSettlement.create({data:{orderId:id,chefId:chef.id,mode,status:mode==='TRANSFER'?'AVAILABLE':'PROCESSING',chefFen,commissionFen,subsidyFen,snapshot:{netFen:net,serviceFen:d.serviceFen,rate,approvedBy:actorId??'system',paymentIds:captures.map(p=>p.id)}}});
    if(mode==='TRANSFER'){
     await tx.chefWalletEntry.create({data:{chefId:chef.id,reference:'settlement:'+id,kind:'ORDER_INCOME',amountFen:chefFen}});
     await tx.ledgerEntry.create({data:{orderId:id,reference:'chef-payable:'+id,kind:'CHEF_PAYABLE',amountFen:-chefFen}});
@@ -62,8 +62,18 @@ export class ChefFinanceService extends PaymentService {
     }
    }
    await tx.order.update({where:{id},data:{settlementStatus:mode==='TRANSFER'?'SETTLED':'PROCESSING',details:{...d,settlement:{chefFen,commissionFen,subsidyFen,mode,status:settlement.status}}}});
-   await this.audit(tx,user.id,'CHEF_SETTLEMENT_CREATED',id,{chefFen,commissionFen,subsidyFen,mode});await this.event(tx,mode==='TRANSFER'?'订单收入已结算至厨师可提现余额':'订单已提交微信分账，等待到账',o,[chef.userId]);return settlement;
-  });
+   await this.audit(tx,actorId,'CHEF_SETTLEMENT_CREATED',id,{chefFen,commissionFen,subsidyFen,mode,auto:!actorId,cancelled});await this.event(tx,cancelled?'取消补偿已结算至厨师可提现余额':mode==='TRANSFER'?'订单收入已结算至厨师可提现余额':'订单已提交微信分账，等待到账',o,[chef.userId]);return settlement;
+ }
+ /** SRS 8.5 automatic settlement: only orders whose snapshot uses CONFIRM_DELAY; blocked orders are retried next tick. */
+ async autoSettle(limit=20){
+  const now=this.clock(),rows=(await this.db.order.findMany({where:{settlementStatus:'PENDING',acceptedChefId:{not:null},aftersaleStatus:{in:['NONE','CLOSED']},ruleSnapshot:{path:['settlementTrigger'],equals:'CONFIRM_DELAY'}},select:{id:true,confirmedAt:true,reviewStatus:true,ruleSnapshot:true,details:true},take:1000}))
+   .map(o=>({id:o.id,at:this.settlementEligibleAt(o)})).filter(o=>o.at&&o.at<=now).sort((a,b)=>a.at!.getTime()-b.at!.getTime()).slice(0,limit);
+  let settled=0;
+  for(const {id} of rows){
+   try{await this.transaction<unknown>(tx=>process.env.APP_MODE==='sandbox'?this.sandboxSettleTx(tx,id,null):this.settleTx(tx,id,null));const o=await this.db.order.findUniqueOrThrow({where:{id}});if(o.settlementStatus==='SETTLED')settled++;}
+   catch(e){if(!(e instanceof ApiError))log('warn','settlement.auto_failed',{orderId:id,...safeError(e)});}
+  }
+  return settled;
  }
  async payoutProfile(user:User,b:any){return this.transaction(async tx=>{
   const chef=await tx.chef.findUnique({where:{userId:user.id}});ensure(chef&&['TRIAL','APPROVED'].includes(chef.status),'NOT_CHEF','审核通过后可绑定收款资料');ensure(b.consent===true,'CONSENT_REQUIRED','请确认收款账户属于本人');const name=text(b.name,'收款户名',64),bank=text(b.bank,'开户行',100),account=text(b.account,'收款账号',40).replace(/\s+/g,'');ensure(/^[0-9]{8,40}$/.test(account),'INVALID_ACCOUNT','收款账号格式无效',400);
@@ -72,13 +82,15 @@ export class ChefFinanceService extends PaymentService {
  async withdraw(user:User,b:any){return this.transaction(async tx=>{
   const key=user.id+':withdraw:'+text(b.idempotencyKey,'幂等键',100),amountFen=integer(b.amountFen,'提现金额',10,20000000),old=await tx.chefWithdrawal.findUnique({where:{idempotencyKey:key}});if(old){ensure(old.amountFen===amountFen,'IDEMPOTENCY_CONFLICT','请求金额不一致');return this.safeWithdrawal(old);}
   const chef=await tx.chef.findUnique({where:{userId:user.id}});ensure(chef&&['TRIAL','APPROVED'].includes(chef.status),'NOT_CHEF','当前厨师状态不允许提现');const profile=obj(chef.data);ensure(profile.payoutName&&profile.payoutBank&&profile.payoutAccount&&profile.payoutConsentAt,'PAYOUT_PROFILE','请先登记完整的本人收款账户');
+  const s=srs(await this.rules(tx));
+  if(s){const day=new Date(this.clock().toLocaleDateString('en-CA',{timeZone:'Asia/Shanghai'})+'T00:00:00+08:00');withdrawalCheck(s,{amountFen,todayCount:await tx.chefWithdrawal.count({where:{chefId:chef.id,createdAt:{gte:day}}}),inProgress:await tx.chefWithdrawal.count({where:{chefId:chef.id,status:{in:[...ACTIVE,'REVIEW_REQUIRED']}}})});}
   ensure(!await tx.order.findFirst({where:{acceptedChefId:chef.id,aftersaleStatus:'PROCESSING'}}),'DISPUTED','存在处理中售后，暂缓提现');ensure(await this.walletBalance(tx,chef.id)>=amountFen,'INSUFFICIENT_BALANCE','可提现余额不足');
   const w=await tx.chefWithdrawal.create({data:{chefId:chef.id,userId:user.id,amountFen,idempotencyKey:key,encryptedName:profile.payoutName,metadata:{payoutMode:'OFFLINE',encryptedBank:profile.payoutBank,encryptedAccount:profile.payoutAccount,accountLast4:profile.payoutAccountLast4}}});
   await tx.chefWalletEntry.create({data:{chefId:chef.id,reference:'hold:'+w.id,kind:'WITHDRAWAL_HOLD',amountFen:-amountFen}});await this.audit(tx,user.id,'CHEF_WITHDRAWAL_REQUESTED',w.id,{amountFen});return this.safeWithdrawal(w);
  });}
  async withdrawalAction(user:User,id:string,b:any){return this.transaction(async tx=>{
   const w=await tx.chefWithdrawal.findUnique({where:{id}});ensure(w,'NOT_FOUND','提现单不存在',404);
-  const own=w.userId===user.id;ensure(['cancel','approve','reject','record'].includes(b.action),'INVALID_ACTION','操作无效');if(b.action==='cancel')ensure(own,'FORBIDDEN','只能取消本人提现',403);else{this.role(user,'FINANCE');ensure(!own,'SELF_APPROVAL','不可处理本人提现');}
+  const own=w.userId===user.id;ensure(['cancel','approve','reject','record'].includes(b.action),'INVALID_ACTION','操作无效');if(b.action==='cancel'){ensure(own,'FORBIDDEN','只能取消本人提现',403);ensure(srs(await this.rules(tx))?.withdrawRevocable!==false,'WITHDRAW_NOT_REVOCABLE','提现申请提交后不可撤销',409);}else{this.role(user,'FINANCE');ensure(!own,'SELF_APPROVAL','不可处理本人提现');}
   if(b.action==='record'){
    ensure(obj(w.metadata).payoutMode==='OFFLINE'&&w.status==='APPROVED'&&w.approvedBy&&w.approvedBy!==user.id,'SEPARATION_REQUIRED','线下打款必须由另一名财务登记');
    const receipt=text(b.receipt,'打款凭证',200);await tx.chefWithdrawal.update({where:{id},data:{status:'SUCCESS',metadata:{...obj(w.metadata),receipt,paidAt:this.clock().toISOString(),recordedBy:user.id}}});
@@ -150,9 +162,25 @@ export class ChefFinanceService extends PaymentService {
    }
   });
  }
+ override async applyRecovery(tx:Tx,o:Order,refundFen:number,ticketId:string){
+  const s=await tx.chefSettlement.findUnique({where:{orderId:o.id}});
+  if(!s)return super.applyRecovery(tx,o,refundFen,ticketId);
+  ensure(s.mode==='TRANSFER'&&s.status==='AVAILABLE','RECOVERY_REQUIRED','微信分账已提交或已出款，系统不能自动追回。请财务线下追偿，不要把未追回标记为成功');
+  const plan=this.recoveryPlan(o,refundFen,s.chefFen);
+  if(!await tx.ledgerEntry.findUnique({where:{reference:'recovery:'+ticketId}})){
+   await tx.ledgerEntry.create({data:{orderId:o.id,reference:'recovery:'+ticketId,kind:'CHEF_RECOVERY',amountFen:plan.recoveryFen}});
+   if(plan.recoveryFen>0){await tx.chefWalletEntry.create({data:{chefId:s.chefId,reference:'recovery:'+ticketId,kind:'RECOVERY',amountFen:-plan.recoveryFen}});const chef=await tx.chef.findUnique({where:{id:s.chefId}});if(chef)await tx.notification.create({data:{userId:chef.userId,orderId:o.id,body:'售后裁定退款 '+(refundFen/100).toFixed(2)+' 元，已从可提现余额扣回 '+(plan.recoveryFen/100).toFixed(2)+' 元'}});}
+   await this.audit(tx,null,'CHEF_RECOVERY_POSTED',o.id,{ticketId,recoveryFen:plan.recoveryFen,chefFen:plan.chefFen});
+  }
+  return plan;
+ }
  override async queueRefund(tx:Tx,o:Order,amount:number,key:string,onlyPayment?:string){
   const s=await tx.chefSettlement.findUnique({where:{orderId:o.id}});
-  if(s&&s.status!=='REVERSED'&&(!onlyPayment||obj(s.snapshot).paymentIds?.includes(onlyPayment)))ensure(false,'RECOVERY_REQUIRED','该订单已进入结算，请财务核对厨师出款并完成追偿后处理退款');
+  if(s&&s.status!=='REVERSED'&&(!onlyPayment||obj(s.snapshot).paymentIds?.includes(onlyPayment))){
+   const ticketId=key.startsWith('ticket:')?key.slice('ticket:'.length):'';
+   const booked=ticketId!==''&&await tx.ledgerEntry.findUnique({where:{reference:'recovery:'+ticketId}});
+   ensure(booked,'RECOVERY_REQUIRED',s.mode==='PROFITSHARING'?'微信分账已提交或已出款，系统不能自动追回。请财务线下追偿，不要把未追回标记为成功':'该订单已进入结算，请财务核对厨师出款并完成追偿后处理退款');
+  }
   return super.queueRefund(tx,o,amount,key,onlyPayment);
  }
  async financeRoles(user:User,b?:any){this.role(user,'ADMIN');if(!b)return this.db.user.findMany({where:{roles:{hasSome:['FINANCE','FINANCE_MANAGER']}},select:{id:true,username:true,displayName:true,roles:true}});
@@ -163,7 +191,8 @@ export class ChefFinanceService extends PaymentService {
  async reconcileFinance(user:User,kind:string,id:string){this.role(user,'FINANCE','FINANCE_MANAGER');if(kind==='withdrawals'){const w=await this.db.chefWithdrawal.findUniqueOrThrow({where:{id}});ensure(obj(w.metadata).payoutMode!=='OFFLINE','INVALID_ACTION','线下打款单不查询微信结果');await this.syncTransfer(id);}else if(kind==='shares')await this.syncShare(id);else ensure(false,'INVALID_ACTION','无效财务操作');return {ok:true};}
  private financeRunning=false;
  override async tick(){
-  const result=await super.tick();if(!this.wx||this.financeRunning)return result;this.financeRunning=true;
+  const base=await super.tick();if(this.financeRunning)return base;
+  const result={...base,settled:await this.autoSettle()};if(!this.wx)return result;this.financeRunning=true;
   try{const withdrawals=await this.db.chefWithdrawal.findMany({where:{status:{in:ACTIVE.filter(s=>s!=='REQUESTED')}},orderBy:{updatedAt:'asc'},take:3});const shares=await this.db.profitShareTask.findMany({where:{status:{in:['CREATED','PROCESSING']}},orderBy:{updatedAt:'asc'},take:3});
    await Promise.all([...withdrawals.filter(w=>obj(w.metadata).payoutMode!=='OFFLINE').map(w=>({kind:'withdrawal',id:w.id})),...shares.map(s=>({kind:'share',id:s.id}))].map(async job=>{try{if(job.kind==='withdrawal')await this.syncTransfer(job.id);else await this.syncShare(job.id);}catch(e){log('warn','finance.reconcile_pending',{jobId:job.id,kind:job.kind,...safeError(e)});}finally{if(job.kind==='withdrawal')await this.db.chefWithdrawal.update({where:{id:job.id},data:{updatedAt:this.clock()}});else await this.db.profitShareTask.update({where:{id:job.id},data:{updatedAt:this.clock()}});}}));
   }finally{this.financeRunning=false;}return result;

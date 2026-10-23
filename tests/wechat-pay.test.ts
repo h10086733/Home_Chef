@@ -1,4 +1,5 @@
 import {ChefFinanceService} from '../apps/api/src/chef-finance';
+import {remainingChefFen} from '../apps/api/src/policy';
 import {constants,privateDecrypt} from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {mkdtemp,writeFile,rm} from 'node:fs/promises';
@@ -46,8 +47,8 @@ const wx=new WechatPay(config,transport),svc=new PaymentService(db,()=>new Date(
 function notification(event:any){const nonce='123456789012',aad='transaction',cipher=createCipheriv('aes-256-gcm',Buffer.from(config.apiKey),nonce);cipher.setAAD(Buffer.from(aad));const ciphertext=Buffer.concat([cipher.update(JSON.stringify(event)),cipher.final(),cipher.getAuthTag()]).toString('base64');const raw=JSON.stringify({event_type:'TRANSACTION.SUCCESS',resource:{algorithm:'AEAD_AES_256_GCM',original_type:'transaction',nonce,associated_data:aad,ciphertext}});return {raw,headers:signed(raw)};}
 test('WeChat APIv3 payment, isolated database and signed transport',async t=>{
  const f=JSON.parse(readFileSync('.data/business-fixture.json','utf8')),prefix='wx'+randomUUID().replaceAll('-','').slice(0,12),password='PaymentTest2026!';
- const auth=await svc.login({username:prefix,password,displayName:'隔离支付测试'},true),user=await svc.session(auth.token);
- const strangerAuth=await svc.login({username:prefix+'x',password,displayName:'隔离权限测试'},true),stranger=await svc.session(strangerAuth.token);
+ const auth=await svc.login({username:prefix,password,displayName:'隔离支付测试',agreed:true},true),user=await svc.session(auth.token);
+ const strangerAuth=await svc.login({username:prefix+'x',password,displayName:'隔离权限测试',agreed:true},true),stranger=await svc.session(strangerAuth.token);
  const address=await svc.address(user,{label:'隔离地址',regionCode:f.regionCode,latitude:28.194,longitude:112.961,coordinateSystem:'GCJ02',fullText:'支付自动化测试地址'});
  const created:string[]=[];t.after(async()=>{await db.bookingLock.deleteMany({where:{orderId:{in:created}}});await db.order.updateMany({where:{id:{in:created},contractStatus:{in:['PENDING_PAYMENT','PENDING_ACCEPTANCE']}},data:{contractStatus:'CANCELLED'}});});let index=0;
  const order=async(ingredientMode='CUSTOMER')=>{const startsAt=new Date(Date.now()+(5+index++)*86400000);startsAt.setHours(18,0,0,0);const q=await svc.quote(user,{packageId:f.packages[0],addressId:address.id,startsAt:startsAt.toISOString(),guests:3,children:0,elders:0,allergens:'无',kitchen:'可用',cuisine:'湘菜',ingredientMode,ingredientFen:10000,mode:'SELF',hours:2});const o=await svc.submitQuote(user,q.id);created.push(o.id);return o;};
@@ -151,7 +152,7 @@ test('Chef settlement, withdrawal and profit sharing',async t=>{
  const f=JSON.parse(readFileSync('.data/business-fixture.json','utf8')),tag='finance'+randomUUID().slice(0,8),password='FinanceTest2026!';
  process.env.WECHAT_TRANSFER_ENABLED='true';process.env.WECHAT_TRANSFER_SCENE_ID='TEST_ONLY';process.env.WECHAT_TRANSFER_SCENE_REPORTS=JSON.stringify([{info_type:'服务类型',info_content:'测试厨师服务'}]);process.env.WECHAT_PROFITSHARING_MAX_RATIO='0.9';
  const finance=new ChefFinanceService(db,()=>new Date(Date.now()+8*86400000),wx),admin=await db.user.create({data:{username:tag+'admin',displayName:'测试财务',roles:['FINANCE']}}),recorder=await db.user.create({data:{username:tag+'recorder',displayName:'测试出纳',roles:['FINANCE']}});
- const customer=await svc.session((await svc.login({username:tag,password,displayName:'财务测试用户'},true)).token);openId='customer-'+tag;await svc.bindWechat(customer,'code');
+ const customer=await svc.session((await svc.login({username:tag,password,displayName:'财务测试用户',agreed:true},true)).token);openId='customer-'+tag;await svc.bindWechat(customer,'code');
  const chef=await db.chef.findUniqueOrThrow({where:{id:f.chefs[0]}}),chefUser=await db.user.findUniqueOrThrow({where:{id:chef.userId}});openId='chef-'+tag;await finance.bindWechat(chefUser,'code');await finance.payoutProfile(chefUser,{name:'测试厨师',bank:'测试银行长沙支行',account:'6222020202020202',consent:true});
  const addr=await svc.address(customer,{label:'财务测试',regionCode:f.regionCode,latitude:28.194,longitude:112.961,coordinateSystem:'GCJ02',fullText:'隔离支付测试地址'});let idx=0;const ids:string[]=[];
  t.after(async()=>{process.env.WECHAT_TRANSFER_ENABLED='false';process.env.WECHAT_PROFITSHARING_ENABLED='false';await db.bookingLock.deleteMany({where:{orderId:{in:ids}}});await db.order.updateMany({where:{id:{in:ids},contractStatus:'PENDING_ACCEPTANCE'},data:{contractStatus:'CANCELLED'}});});
@@ -202,5 +203,70 @@ test('Chef settlement, withdrawal and profit sharing',async t=>{
  });
  await t.test('direct profit sharing preserves mode, checks approved ratio, never creates withdrawable balance, and confirms once',async()=>{
   const shared=await completeOrder('PROFITSHARING');process.env.WECHAT_PROFITSHARING_MAX_RATIO='0.3';await assert.rejects(()=>finance.settle(admin,shared.id),/获批比例/);assert.equal(await db.chefSettlement.count({where:{orderId:shared.id}}),0);process.env.WECHAT_PROFITSHARING_MAX_RATIO='0.9';const before=(await finance.wallet(chefUser)).availableFen;const s=await finance.settle(admin,shared.id);assert.equal(s.mode,'PROFITSHARING');const task=await db.profitShareTask.findFirstOrThrow({where:{settlementId:s.id}});await finance.syncShare(task.id);assert.equal((await db.chefSettlement.findUniqueOrThrow({where:{id:s.id}})).status,'PROCESSING');shares.get(task.id).state='FINISHED';shares.get(task.id).receivers[0].result='SUCCESS';await Promise.all([finance.syncShare(task.id),finance.syncShare(task.id)]);assert.equal((await db.chefSettlement.findUniqueOrThrow({where:{id:s.id}})).status,'PAID');assert.equal((await finance.wallet(chefUser)).availableFen,before);assert.equal(((await db.order.findUniqueOrThrow({where:{id:shared.id}})).details as any).settlement.status,'PAID');assert.equal(await db.ledgerEntry.count({where:{reference:'profitshare:'+task.id}}),1);await assert.rejects(()=>finance.transaction(tx=>finance.queueRefund(tx,shared,100,'after-share')),/追偿/);
+ });
+ const srsSnapshot=(rules:any)=>({...rules,srsVersion:'1.0',settlementTrigger:'CONFIRM_DELAY',settleDelayHours:24,commissionRate:0,commissionBase:'NET'});
+ await t.test('SRS confirm+24h orders settle automatically at zero commission without a finance actor',async()=>{
+  const fresh=await completeOrder(),stored=await db.order.findUniqueOrThrow({where:{id:fresh.id}});await db.order.update({where:{id:fresh.id},data:{ruleSnapshot:srsSnapshot(stored.ruleSnapshot)}});
+  const realClock=new ChefFinanceService(db,()=>new Date(),wx);await assert.rejects(()=>realClock.settle(admin,fresh.id),/结算时间/);
+  await realClock.autoSettle();assert.equal(await db.chefSettlement.count({where:{orderId:fresh.id}}),0);
+  await finance.autoSettle();const s=await db.chefSettlement.findUniqueOrThrow({where:{orderId:fresh.id}});
+  assert.equal(s.commissionFen,0);assert.equal(s.chefFen,stored.receivedFen);assert.equal(s.mode,'TRANSFER');assert.equal((s.snapshot as any).approvedBy,'system');
+  assert.equal((await db.order.findUniqueOrThrow({where:{id:fresh.id}})).settlementStatus,'SETTLED');assert.equal(await db.chefWalletEntry.count({where:{reference:'settlement:'+fresh.id}}),1);
+  await finance.autoSettle();assert.equal(await db.chefWalletEntry.count({where:{reference:'settlement:'+fresh.id}}),1);
+ });
+ await t.test('SRS late cancellation queues a partial WeChat refund and settles the deduction to the chef after the refund succeeds',async()=>{
+  const startsAt=new Date(Date.now()+(5+idx++)*86400000);startsAt.setHours(18,0,0,0);
+  const q=await svc.quote(customer,{packageId:f.packages[0],addressId:addr.id,startsAt:startsAt.toISOString(),guests:3,children:0,elders:0,allergens:'无',kitchen:'可用',cuisine:'湘菜',ingredientMode:'CUSTOMER',mode:'SELF',hours:2});
+  const o=await svc.submitQuote(customer,q.id);ids.push(o.id);const p=await svc.prepay(customer,o.id,'FULL_PAYMENT');trades.get(p.paymentId).trade_state='SUCCESS';await svc.paymentStatus(customer,p.paymentId);
+  await svc.accept(chefUser,o.id);const stored=await db.order.findUniqueOrThrow({where:{id:o.id}}),d=stored.details as any;
+  await db.order.update({where:{id:o.id},data:{ruleSnapshot:srsSnapshot(stored.ruleSnapshot),details:{...d,startsAt:new Date(Date.now()+12*3600000).toISOString()}}});
+  const deduct=Math.round(d.serviceFen*.3),preview=await svc.cancelPreview(customer,o.id);assert.equal(preview.tier,'MID');assert.equal(preview.deductFen,deduct);
+  await svc.cancel(customer,o.id,{reason:'临时有事',expectedDeductFen:deduct});
+  const refund=await db.paymentRequest.findFirstOrThrow({where:{orderId:o.id,kind:'REFUND'}});assert.equal(refund.amountFen,stored.receivedFen-deduct);
+  let row=await db.order.findUniqueOrThrow({where:{id:o.id}});assert.equal(row.contractStatus,'CANCELLED');assert.equal(row.settlementStatus,'PENDING');assert.equal(row.refundedFen,0);
+  await finance.autoSettle();assert.equal(await db.chefSettlement.count({where:{orderId:o.id}}),0);
+  await svc.reconcileRefund(refund);refunds.get(refund.id).status='SUCCESS';await svc.reconcileRefund(refund);
+  await finance.autoSettle();const s=await db.chefSettlement.findUniqueOrThrow({where:{orderId:o.id}});assert.equal(s.chefFen,deduct);assert.equal(s.commissionFen,0);
+  row=await db.order.findUniqueOrThrow({where:{id:o.id}});assert.equal(row.settlementStatus,'SETTLED');assert.equal(row.refundedFen,stored.receivedFen-deduct);
+ });
+ await t.test('SRS withdrawal: minimum amount, one in progress, not revocable, daily limit',async()=>{
+  const previous=await db.platformRule.findFirstOrThrow({orderBy:{createdAt:'desc'}}),srsTag=tag+'srs';
+  await db.platformRule.create({data:{id:srsTag+'-rules',publishedBy:admin.id,data:{...(previous.data as any),srsVersion:'1.0',withdrawMinFen:10000,withdrawDailyLimit:3,withdrawRevocable:false,insuranceRequired:false}}});
+  try{
+   const finance=new ChefFinanceService(db,()=>new Date(),wx);
+   const u=await db.user.create({data:{username:srsTag,displayName:'提现规则厨师',roles:['USER','CHEF']}}),c=await db.chef.create({data:{userId:u.id,status:'APPROVED',data:{}}});
+   await finance.payoutProfile(u,{name:'测试厨师',bank:'测试银行',account:'6222020202020999',consent:true});
+   await db.chefWalletEntry.create({data:{chefId:c.id,reference:'isolated-income:'+srsTag,kind:'ORDER_INCOME',amountFen:50000}});
+   const ask=(amountFen:number)=>finance.withdraw(u,{amountFen,idempotencyKey:randomUUID()});
+   await assert.rejects(()=>ask(9999),/不低于 100 元/);
+   for(let i=0;i<3;i++){
+    const w=await ask(10000);await assert.rejects(()=>ask(10000),/处理中/);await assert.rejects(()=>finance.withdrawalAction(u,w.id,{action:'cancel'}),/不可撤销/);
+    await finance.withdrawalAction(admin,w.id,{action:'approve'});await finance.withdrawalAction(recorder,w.id,{action:'record',receipt:'srs-'+i});
+   }
+   await assert.rejects(()=>ask(10000),/上限/);assert.equal((await finance.wallet(u)).availableFen,20000);
+  }finally{await db.platformRule.create({data:{id:srsTag+'-restore',publishedBy:admin.id,data:previous.data as any}});}
+ });
+ await t.test('settled wallet refund debits the chef and queues the WeChat refund; profit sharing is not reversed',async()=>{
+  const clock=new Date(Date.now()+8*86400000);
+  const ready=async(mode?:string)=>{const o=await completeOrder(mode);const stored=await db.order.findUniqueOrThrow({where:{id:o.id}});await db.order.update({where:{id:o.id},data:{confirmedAt:new Date(clock.getTime()-3600000),reviewStatus:'EXPIRED',ruleSnapshot:{...(stored.ruleSnapshot as any),settlementTrigger:'REVIEW_OR_EXPIRE',settlementDelayHours:0}}});return o;};
+  const o=await ready();const before=(await finance.wallet(chefUser)).availableFen;const s=await finance.settle(admin,o.id);assert.equal((await finance.wallet(chefUser)).availableFen,before+s.chefFen);
+  const support=await db.user.create({data:{username:tag+'support',roles:['CUSTOMER_SERVICE']}}),manager=await db.user.create({data:{username:tag+'manager',roles:['FINANCE_MANAGER']}});
+  const refundFen=2000,ticket=await finance.ticket(customer,o.id,{reason:'结算后部分退款'});
+  await finance.decideTicket(support,ticket.id,{action:'propose',refundFen,decision:'退一部分服务费'});
+  await finance.decideTicket(manager,ticket.id,{action:'approve'});
+  await finance.decideTicket(admin,ticket.id,{action:'execute'});
+  const stored=await db.order.findUniqueOrThrow({where:{id:o.id}}),d=stored.details as any,next=remainingChefFen(stored.ruleSnapshot,d.serviceFen,stored.receivedFen-refundFen,d.discountFen??0);
+  assert.equal(stored.settlementStatus,'SETTLED');assert.equal(stored.refundedFen,0);assert.equal(d.adjudicatedNetFen,stored.receivedFen-refundFen);
+  assert.equal((await db.chefSettlement.findUniqueOrThrow({where:{orderId:o.id}})).chefFen,s.chefFen);
+  assert.equal((await db.ledgerEntry.findUniqueOrThrow({where:{reference:'recovery:'+ticket.id}})).amountFen,s.chefFen-next.chefFen);
+  assert.equal((await finance.wallet(chefUser)).availableFen,before+next.chefFen);
+  const refund=await db.paymentRequest.findFirstOrThrow({where:{orderId:o.id,kind:'REFUND'}});assert.equal(refund.amountFen,refundFen);assert.equal(refund.status,'CREATED');
+  const shared=await ready('PROFITSHARING');await finance.settle(admin,shared.id);
+  const blocked=await finance.ticket(customer,shared.id,{reason:'分账后不能自动追回'});
+  await finance.decideTicket(support,blocked.id,{action:'propose',refundFen:1000,decision:'不应自动追回'});
+  await finance.decideTicket(manager,blocked.id,{action:'approve'});
+  await assert.rejects(()=>finance.decideTicket(admin,blocked.id,{action:'execute'}),/不能自动追回/);
+  assert.equal(await db.ledgerEntry.count({where:{reference:'recovery:'+blocked.id}}),0);
+  process.env.WECHAT_PROFITSHARING_ENABLED='false';
  });
 });

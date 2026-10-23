@@ -42,6 +42,7 @@ try{
  assert.equal((await read('/orders/'+order.id)).contractStatus,'ACCEPTED');
  await chef.screenshot({path:root+'/chef-workflow.png',fullPage:true});
  await chef.getByRole('button',{name:'申请取消',exact:true}).click();
+ await chef.getByRole('button',{name:'OK',exact:true}).or(chef.getByRole('button',{name:'确 定',exact:true})).click();
  await chef.getByText('沙箱退款完成').waitFor({timeout:2000}).catch(()=>{});
  await page.reload();await page.getByRole('heading',{name:'附近的好厨师'}).waitFor();
  await page.setViewportSize({width:390,height:844});await page.screenshot({path:root+'/home-mobile.png',fullPage:true});

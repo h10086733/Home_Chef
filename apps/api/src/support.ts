@@ -1,9 +1,11 @@
-import { Prisma, User } from '@prisma/client';
+import { Prisma, User, Order } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { Service, obj, HOUR } from './service';
 import { ensure, text, integer } from './errors';
 import { decrypt, digest } from './security';
+import { commissionFen, imRisk, remainingChefFen, srsInput } from './policy';
 type Data=Record<string,any>;
+type Tx=Prisma.TransactionClient;
 export class MvpService extends Service {
 
 
@@ -80,10 +82,9 @@ export class MvpService extends Service {
       const participant=o.customerId===user.id||c?.id===o.acceptedChefId;
       if(b){
         ensure(participant&&o.contractStatus==='ACCEPTED','CHAT_UNAVAILABLE','接单后交易双方可以聊天',403);
-        const body=text(b.body,'消息',1000);
-        const blocked=/(微信|微.?信|wx|wechat|QQ|[1１][3-9３-９][0-9０-９\s-]{9,}|线下.{0,5}(转账|支付)|加我|支付宝|https?:\/\/)/i.test(body);
+        const original=text(b.body,'消息',1000),risk=imRisk(original),blocked=risk.action==='BLOCK',body=risk.body;
         const row=await tx.chatMessage.create({data:{orderId:id,senderId:user.id,body,blocked}});
-        await this.audit(tx,user.id,blocked?'IM_BLOCKED':'IM_SENT',id,{messageId:row.id});
+        await this.audit(tx,user.id,blocked?'IM_BLOCKED':risk.action==='MASK'?'IM_MASKED':'IM_SENT',id,{messageId:row.id,rule:risk.rule});
         if(blocked)return {blocked:true};
         await this.event(tx,'有新的订单消息',o,c?[c.userId]:[]);return row;
       }
@@ -146,7 +147,7 @@ export class MvpService extends Service {
     const [orders,chefs,users,newUsers,tickets,cancelled,disputes,payments,refunds]=await Promise.all([this.db.order.count(),this.db.chef.count(),this.db.user.count({where:{roles:{has:'USER'}}}),this.db.user.count({where:{createdAt:{gte:since},roles:{has:'USER'}}}),this.db.serviceTicket.count({where:{status:{not:'CLOSED'}}}),this.db.order.count({where:{contractStatus:'CANCELLED'}}),this.db.order.count({where:{aftersaleStatus:'PROCESSING'}}),this.db.ledgerEntry.aggregate({where:{kind:'PAYMENT'},_sum:{amountFen:true}}),this.db.ledgerEntry.aggregate({where:{kind:'REFUND'},_sum:{amountFen:true}})]);
     return {orders,chefs,users,newUsers30d:newUsers,openTickets:tickets,cancelledOrders:cancelled,disputedOrders:disputes,cancellationRate:orders?cancelled/orders:0,disputeRate:orders?disputes/orders:0,receivedFen:payments._sum.amountFen??0,refundedFen:-(refunds._sum.amountFen??0),sandbox:process.env.APP_MODE==='sandbox'};
   }
-  async opsChefs(user:User){this.role(user,'REVIEWER','OPERATOR','ADMIN');const rows=await this.db.chef.findMany({include:{user:{select:{displayName:true}},packages:true},orderBy:{createdAt:'desc'}});const penalties=await this.db.chefPenalty.findMany({orderBy:{createdAt:'desc'}});return rows.map(c=>({...c,penalties:penalties.filter(p=>p.chefId===c.id),data:{...obj(c.data),healthAssetId:user.roles.includes('REVIEWER')?obj(c.data).healthAssetId:undefined}}));}
+  async opsChefs(user:User){this.role(user,'REVIEWER','OPERATOR','ADMIN');const rows=await this.db.chef.findMany({include:{user:{select:{displayName:true}},packages:true},orderBy:{createdAt:'desc'}});const penalties=await this.db.chefPenalty.findMany({orderBy:{createdAt:'desc'}});return rows.map(c=>({...c,penalties:penalties.filter(p=>p.chefId===c.id),data:{...obj(c.data),payoutName:undefined,payoutBank:undefined,payoutAccount:undefined,...(user.roles.includes('REVIEWER')?{}:{healthAssetId:undefined,insuranceAssetId:undefined,pendingCerts:Object.fromEntries(Object.entries(obj(obj(c.data).pendingCerts)).map(([k,v])=>[k,{...obj(v),assetId:undefined}]))})}}));}
   async manageChef(user:User,id:string,b:Data){
     this.role(user,'REVIEWER','OPERATOR','ADMIN');
     return this.transaction(async tx=>{
@@ -190,6 +191,37 @@ export class MvpService extends Service {
     for(const order of orders){if(!await this.db.serviceTicket.findFirst({where:{orderId:order.id,status:{not:'CLOSED'}}}))continue;await this.db.$transaction(tx=>this.audit(tx,user.id,'CHAT_STAFF_READ',order.id));allowed.push({orderId:order.id,customerId:order.customerId,chefId:order.acceptedChefId,messages:await this.db.chatMessage.findMany({where:{orderId:order.id},orderBy:{createdAt:'asc'},take:200})});}
     return allowed;
   }
+  /** SRS 3.3.6: chef submits a renewed health certificate or accident insurance policy for review. */
+  async submitCertificate(user:User,b:Data){
+    ensure(['HEALTH','INSURANCE'].includes(b.kind),'INVALID_CERT','证照类型无效',400);
+    const validUntil=new Date(text(b.validUntil,'有效期至'));ensure(Number.isFinite(validUntil.getTime())&&validUntil>this.clock(),'INVALID_CERT','有效期须晚于今天',400);
+    return this.transaction(async tx=>{
+      const c=await tx.chef.findUnique({where:{userId:user.id}});ensure(c&&!['CLOSED','BANNED'].includes(c.status),'NOT_CHEF','请先申请成为厨师',403);
+      const file=await tx.fileAsset.findUnique({where:{id:text(b.assetId,'证照图片')}});ensure(file?.userId===user.id&&!file.orderId,'INVALID_EVIDENCE','请上传本人证照图片',400);
+      const d=obj(c.data),pendingCerts={...obj(d.pendingCerts),[b.kind]:{assetId:file.id,validUntil:validUntil.toISOString(),submittedAt:this.clock().toISOString()}};
+      await tx.chef.update({where:{id:c.id},data:{data:{...d,pendingCerts}}});
+      await this.audit(tx,user.id,'CHEF_CERT_SUBMITTED',c.id,{kind:b.kind});return {kind:b.kind,status:'PENDING_REVIEW'};
+    });
+  }
+  async reviewCertificate(user:User,id:string,b:Data){
+    this.role(user,'REVIEWER');ensure(['HEALTH','INSURANCE'].includes(b.kind)&&['approve','reject'].includes(b.action),'INVALID_ACTION','证照审核参数无效',400);
+    const reason=text(b.reason,'审核说明',500);
+    return this.transaction(async tx=>{
+      const c=await tx.chef.findUnique({where:{id}});ensure(c,'NOT_FOUND','厨师不存在',404);ensure(c.userId!==user.id,'SELF_REVIEW','不可审核本人');
+      const d=obj(c.data),pending=obj(obj(d.pendingCerts)[b.kind]);ensure(pending.assetId,'NO_PENDING_CERT','没有待审核的证照');
+      const {[b.kind]:_,...rest}=obj(d.pendingCerts);let data:Data={...d,pendingCerts:rest},update:Data={};
+      if(b.action==='approve'){
+        const until=new Date(pending.validUntil);ensure(until>this.clock(),'EXPIRED_CERT','证照已过期，请驳回');
+        if(b.kind==='HEALTH'){
+          data={...data,healthAssetId:pending.assetId};update={healthValidUntil:until};
+          if(c.status==='SUSPENDED'&&d.suspendedReason==='HEALTH_EXPIRED'){const {suspendedReason,statusBeforeSuspend,...clean}=data;data=clean;update={...update,status:statusBeforeSuspend??'APPROVED',acceptingOrders:true};}
+        }else{data={...data,insuranceAssetId:pending.assetId};update={insuranceValidUntil:until};}
+      }
+      const row=await tx.chef.update({where:{id},data:{...update,data}});
+      await tx.notification.create({data:{userId:c.userId,body:(b.kind==='HEALTH'?'健康证':'意外险保单')+(b.action==='approve'?'审核通过':'未通过：'+reason)}});
+      await this.audit(tx,user.id,'CHEF_CERT_'+b.action.toUpperCase(),id,{kind:b.kind,reason});return row;
+    });
+  }
   async auditChef(user:User,id:string,b:Data){
     this.role(user,'REVIEWER');
     return this.transaction(async tx=>{
@@ -214,11 +246,12 @@ export class MvpService extends Service {
         await tx.serviceTicket.update({where:{id},data:{status:'APPROVED',approvedBy:user.id}});
       }else if(b.action==='execute'){
         this.role(user,'FINANCE');ensure(t.status==='APPROVED'&&t.approvedBy!==user.id&&t.proposedBy!==user.id,'SEPARATION_REQUIRED','需要独立财务执行人');
-        ensure(o.settlementStatus!=='SETTLED','RECOVERY_REQUIRED','已结算退款需追偿渠道，沙箱当前不执行该资金动作');
-        await this.refund(tx,o,t.refundFen??0,'ticket:'+id);
-        const remaining=o.receivedFen-o.refundedFen-(t.refundFen??0);
-        // A financial ruling closes this service with the approved net amount.
-        await tx.order.update({where:{id:o.id},data:{contractStatus:o.confirmedAt?'FULFILLED':'CANCELLED',aftersaleStatus:'CLOSED',feeStatus:'SETTLED',fulfillmentStatus:o.confirmedAt?'COMPLETED':'STOPPED',balanceFen:0,settlementStatus:remaining>0?'PENDING':'INELIGIBLE',details:{...obj(o.details),adjudicated:true,adjudicatedNetFen:remaining}}});
+        const refundFen=t.refundFen??0,settled=o.settlementStatus==='SETTLED';
+        if(settled)await this.applyRecovery(tx,o,refundFen,id);
+        await this.refund(tx,o,refundFen,'ticket:'+id);
+        const remaining=o.receivedFen-o.refundedFen-refundFen;
+        // A financial ruling closes this service with the approved net amount. An already settled order keeps its settlement record; the recovery entry is separate.
+        await tx.order.update({where:{id:o.id},data:{contractStatus:o.confirmedAt?'FULFILLED':'CANCELLED',aftersaleStatus:'CLOSED',feeStatus:'SETTLED',fulfillmentStatus:o.confirmedAt?'COMPLETED':'STOPPED',balanceFen:0,settlementStatus:settled?'SETTLED':remaining>0?'PENDING':'INELIGIBLE',details:{...obj(o.details),adjudicated:true,adjudicatedNetFen:remaining}}});
         if(remaining===0)await tx.coupon.updateMany({where:{orderId:o.id},data:{status:'AVAILABLE',orderId:null}});
         await tx.bookingLock.deleteMany({where:{orderId:o.id}});await tx.chefOrder.updateMany({where:{orderId:o.id,status:'INVITED'},data:{status:'EXPIRED'}});
         await tx.insurancePolicy.updateMany({where:{orderId:o.id},data:{status:'SANDBOX_CANCELLED'}});
@@ -227,31 +260,70 @@ export class MvpService extends Service {
       await this.audit(tx,user.id,'TICKET_'+b.action.toUpperCase(),o.id,{ticketId:id});return tx.serviceTicket.findUnique({where:{id}});
     });
   }
+  /**
+   * Books the chef clawback for a refund on an order that was already settled.
+   * Sandbox records an append-only ledger entry. Real wallet and WeChat-split orders are handled by ChefFinanceService.
+   */
+  async applyRecovery(tx:Tx,o:Order,refundFen:number,ticketId:string){
+    const settlement=obj(obj(o.details).settlement);
+    ensure(settlement.provider==='sandbox'&&Number.isSafeInteger(settlement.chefFen),'RECOVERY_REQUIRED','已结算订单退款前必须先入账厨师追偿');
+    const plan=this.recoveryPlan(o,refundFen,settlement.chefFen);
+    if(!await tx.ledgerEntry.findUnique({where:{reference:'recovery:'+ticketId}})){
+      await tx.ledgerEntry.create({data:{orderId:o.id,reference:'recovery:'+ticketId,kind:'CHEF_RECOVERY',amountFen:plan.recoveryFen}});
+      if(plan.recoveryFen>0){const chef=await tx.chef.findUnique({where:{id:o.acceptedChefId!}});if(chef)await tx.notification.create({data:{userId:chef.userId,orderId:o.id,body:'售后裁定退款 '+(refundFen/100).toFixed(2)+' 元，其中 '+(plan.recoveryFen/100).toFixed(2)+' 元从你的收入中扣回'}});}
+      await this.audit(tx,null,'CHEF_RECOVERY_POSTED',o.id,{ticketId,recoveryFen:plan.recoveryFen,chefFen:plan.chefFen});
+    }
+    return plan;
+  }
+  recoveryPlan(o:Order,refundFen:number,paidChefFen:number){
+    const d=obj(o.details),net=o.receivedFen-o.refundedFen-refundFen,subsidy=Number(d.discountFen??0);
+    ensure(net>=0&&Number.isSafeInteger(paidChefFen)&&paidChefFen>=0,'INVALID_REFUND','追偿金额无效');
+    const next=remainingChefFen(o.ruleSnapshot,Number(d.serviceFen)||0,net,subsidy);
+    const recoveryFen=paidChefFen-next.chefFen;
+    ensure(Number.isSafeInteger(next.chefFen)&&next.chefFen>=0&&recoveryFen>=0&&recoveryFen<=paidChefFen,'INVALID_ALLOCATION','追偿后厨师收入为负，请核对退款金额');
+    return {...next,recoveryFen,net};
+  }
+  /** Shared settlement eligibility and allocation for completed orders and cancellation compensation. */
+  async settlementAllocation(tx:Tx,o:Order,legacyHoldHours:number){
+    const d=obj(o.details),rules=obj(o.ruleSnapshot),cancelled=o.contractStatus==='CANCELLED'&&d.cancelCompensationFen>0,adjudicated=d.adjudicated===true&&!cancelled;
+    ensure(o.acceptedChefId,'NOT_FOUND','订单或厨师不存在',404);
+    if(cancelled)ensure(o.settlementStatus==='PENDING'&&['NONE','CLOSED'].includes(o.aftersaleStatus),'SETTLEMENT_BLOCKED','取消补偿尚不满足结算条件');
+    else if(adjudicated)ensure(o.settlementStatus==='PENDING'&&o.feeStatus==='SETTLED'&&['NONE','CLOSED'].includes(o.aftersaleStatus)&&o.balanceFen===0&&(o.contractStatus==='FULFILLED'||o.contractStatus==='CANCELLED'),'SETTLEMENT_BLOCKED','裁定订单尚不满足结算条件');
+    else ensure(o.settlementStatus==='PENDING'&&o.feeStatus==='SETTLED'&&['NONE','CLOSED'].includes(o.aftersaleStatus)&&o.contractStatus==='FULFILLED'&&o.balanceFen===0&&o.confirmedAt,'SETTLEMENT_BLOCKED','订单尚不满足结算条件：未完成、费用未结清或存在争议');
+    const eligibleAt=adjudicated&&!o.confirmedAt?new Date(0):this.settlementEligibleAt(o,legacyHoldHours);ensure(eligibleAt&&eligibleAt<=this.clock(),'SETTLEMENT_HOLD',rules.settlementTrigger==='REVIEW_OR_EXPIRE'?'订单需等待评价完成或评价期结束':rules.settlementTrigger==='CONFIRM_DELAY'?'订单未到结算时间':'订单仍在售后保护期');
+    ensure(!d.pendingChange,'ALLOCATION_PENDING','变更订单需要单独确认分配');
+    ensure(!await tx.serviceTicket.findFirst({where:{orderId:o.id,status:{not:'CLOSED'}}}),'SETTLEMENT_BLOCKED','订单存在未完结售后');
+    ensure(!await tx.paymentRequest.findFirst({where:{orderId:o.id,kind:'REFUND',status:{not:'SUCCEEDED'}}}),'REFUND_PENDING','请等待退款确认完成');
+    const net=o.receivedFen-o.refundedFen,rate=rules.commissionRate;
+    ensure(Number.isFinite(rate)&&rate>=0&&rate<1&&Number.isSafeInteger(d.serviceFen),'INVALID_RATE','结算规则快照无效');
+    if(cancelled)ensure(net===d.cancelCompensationFen,'FUNDS_MISMATCH','取消补偿金额与实收不一致');
+    if(adjudicated)ensure(d.adjudicatedNetFen===net,'FUNDS_MISMATCH','裁定净额与实收不一致');
+    const serviceBase=adjudicated?Math.min(d.serviceFen,net):d.serviceFen;
+    const commission=cancelled?commissionFen(rules,net,net):commissionFen(rules,serviceBase,net),subsidyFen=cancelled?0:d.discountFen??0,chefFen=net+subsidyFen-commission;
+    ensure(Number.isSafeInteger(chefFen)&&chefFen>=0&&Number.isSafeInteger(subsidyFen)&&subsidyFen>=0,'INVALID_ALLOCATION','结算金额异常');
+    return {d,net,rate,commissionFen:commission,subsidyFen,chefFen,cancelled};
+  }
   async settle(user:User,id:string){
     ensure(process.env.APP_MODE==='sandbox','SETTLEMENT_UNAVAILABLE','结算渠道尚未开通',503);
     this.role(user,'FINANCE');
-    return this.transaction(async tx=>{
-      const o=await tx.order.findUnique({where:{id}});ensure(o,'NOT_FOUND','订单不存在',404);
-      if(o.settlementStatus==='SETTLED')return {ok:true};
-      ensure(o.settlementStatus==='PENDING'&&o.feeStatus==='SETTLED'&&['NONE','CLOSED'].includes(o.aftersaleStatus)&&o.acceptedChefId,'SETTLEMENT_BLOCKED','订单尚不满足结算条件');
-      const eligibleAt=this.settlementEligibleAt(o);ensure(eligibleAt&&eligibleAt<=this.clock(),'SETTLEMENT_HOLD','订单需等待评价完成或评价期结束');
-      const d=obj(o.details);ensure(!d.adjudicated,'ALLOCATION_PENDING','部分履约裁定资金分配需另行发布，禁止按普通佣金结算');
-      ensure(o.confirmedAt&&o.balanceFen===0,'SETTLEMENT_BLOCKED','需要完成确认且无欠款');
-      const net=o.receivedFen-o.refundedFen,commissionFen=Math.round(d.serviceFen*obj(o.ruleSnapshot).commissionRate),subsidyFen=d.discountFen??0,chefFen=net+subsidyFen-commissionFen;
-      ensure(chefFen>=0,'NEGATIVE_SETTLEMENT','结算异常');
-      await tx.ledgerEntry.create({data:{orderId:id,reference:'settlement:'+id,kind:'SETTLEMENT',amountFen:-chefFen}});
-      if(subsidyFen)await tx.ledgerEntry.create({data:{orderId:id,reference:'subsidy:'+id,kind:'PLATFORM_SUBSIDY',amountFen:subsidyFen}});
-      await tx.order.update({where:{id},data:{settlementStatus:'SETTLED',details:{...d,settlement:{chefFen,commissionFen,subsidyFen,provider:'sandbox',settledAt:this.clock().toISOString()}}}});
-      await this.audit(tx,user.id,'SANDBOX_SETTLED',id,{chefFen,commissionFen,subsidyFen});return {chefFen,commissionFen,subsidyFen,sandbox:process.env.APP_MODE==='sandbox'};
-    });
+    return this.transaction(tx=>this.sandboxSettleTx(tx,id,user.id));
+  }
+  async sandboxSettleTx(tx:Tx,id:string,actorId:string|null){
+    const o=await tx.order.findUnique({where:{id}});ensure(o,'NOT_FOUND','订单不存在',404);
+    if(o.settlementStatus==='SETTLED')return {ok:true};
+    const {d,chefFen,commissionFen,subsidyFen}=await this.settlementAllocation(tx,o,168);
+    await tx.ledgerEntry.create({data:{orderId:id,reference:'settlement:'+id,kind:'SETTLEMENT',amountFen:-chefFen}});
+    if(subsidyFen)await tx.ledgerEntry.create({data:{orderId:id,reference:'subsidy:'+id,kind:'PLATFORM_SUBSIDY',amountFen:subsidyFen}});
+    await tx.order.update({where:{id},data:{settlementStatus:'SETTLED',details:{...d,settlement:{chefFen,commissionFen,subsidyFen,provider:'sandbox',settledAt:this.clock().toISOString(),auto:!actorId}}}});
+    await this.audit(tx,actorId,'SANDBOX_SETTLED',id,{chefFen,commissionFen,subsidyFen});return {chefFen,commissionFen,subsidyFen,sandbox:true};
   }
   async publishRules(user:User,b:Data){
     this.role(user,'ADMIN');
     ensure(Number.isFinite(b.commissionRate)&&b.commissionRate>=0&&b.commissionRate<1,'INVALID_RATE','佣金比例无效',400);
-    integer(b.matchMinutes,'流拍分钟',1,30);integer(b.radiusM,'服务半径',100,10000);integer(b.urgentMinMinutes,'急单提前分钟',15,120);integer(b.autoConfirmHours??48,'自动确认小时',1,168);integer(b.settlementDelayHours??0,'评价后结算延迟',0,720);integer(b.couponFen,'券额',0,100000);integer(b.couponMinFen,'用券门槛',0,1000000);
-    ensure((b.settlementTrigger??'REVIEW_OR_EXPIRE')==='REVIEW_OR_EXPIRE','INVALID_SETTLEMENT_RULE','结算触发规则无效',400);
+    integer(b.matchMinutes,'流拍分钟',1,30);integer(b.radiusM,'服务半径',100,10000);integer(b.urgentMinMinutes,'急单提前分钟',15,120);integer(b.settlementDelayHours??0,'评价后结算延迟',0,720);integer(b.couponFen,'券额',0,100000);integer(b.couponMinFen,'用券门槛',0,1000000);
+    const s=srsInput(b);
     ensure(Array.isArray(b.regions)&&b.regions.length>0&&b.regions.every((r:Data)=>typeof r.code==='string'&&typeof r.name==='string'&&typeof r.active==='boolean'),'INVALID_REGIONS','片区配置无效',400);
-    const data={commissionRate:b.commissionRate,matchMinutes:b.matchMinutes,radiusM:b.radiusM,urgentMinMinutes:b.urgentMinMinutes,autoConfirmHours:b.autoConfirmHours??48,settlementTrigger:'REVIEW_OR_EXPIRE',settlementDelayHours:b.settlementDelayHours??0,couponFen:b.couponFen,couponMinFen:b.couponMinFen,couponEnabled:b.couponEnabled===true,regions:b.regions,sandbox:process.env.APP_MODE==='sandbox'};
+    const data={...s,commissionRate:b.commissionRate,matchMinutes:b.matchMinutes,radiusM:b.radiusM,urgentMinMinutes:b.urgentMinMinutes,autoConfirmHours:s.autoConfirmHours,settlementDelayHours:b.settlementDelayHours??0,couponFen:b.couponFen,couponMinFen:b.couponMinFen,couponEnabled:b.couponEnabled===true,regions:b.regions,sandbox:process.env.APP_MODE==='sandbox'};
     return this.transaction(async tx=>{const row=await tx.platformRule.create({data:{id:'rules-'+randomUUID(),data,publishedBy:user.id}});await this.audit(tx,user.id,'RULES_PUBLISHED',row.id,{reason:text(b.reason,'变更原因',500)});return row;});
   }
 }

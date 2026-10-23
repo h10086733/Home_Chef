@@ -15,8 +15,8 @@ test('Real-data business flow',async t=>{
  const admin=await db.user.create({data:{username:prefix+'admin',displayName:'测试审核员',roles:['ADMIN','REVIEWER','FINANCE'],passwordHash:hashPassword(password)}});
  await db.platformRule.create({data:{id:prefix+'rules',publishedBy:admin.id,data:{commissionRate:.15,matchMinutes:10,radiusM:3000,urgentMinMinutes:30,couponFen:2000,couponMinFen:20000,couponEnabled:false,regions:[{code:prefix,name:'测试专用区域',active:true}]}}});
  await t.test('registration, duplicate, password, session isolation',async()=>{
-  for(const suffix of ['customer','stranger','chef0','chef1']){const a=await svc.login({username:prefix+suffix,password,displayName:prefix+suffix},true);users.push(await svc.session(a.token));}
-  await assert.rejects(()=>svc.login({username:users[0].username,password,displayName:'重复'},true),/账号已存在/);
+  for(const suffix of ['customer','stranger','chef0','chef1']){const a=await svc.login({username:prefix+suffix,password,displayName:prefix+suffix,agreed:true},true);users.push(await svc.session(a.token));}
+  await assert.rejects(()=>svc.login({username:users[0].username,password,displayName:'重复',agreed:true},true),/账号已存在/);
   await assert.rejects(()=>svc.login({username:users[0].username,password:'wrong'}),/账号或密码不正确/);
   const auth=await svc.login({username:users[0].username,password});assert.equal((await svc.session(auth.token)).id,users[0].id);await svc.logout(auth.token);await assert.rejects(()=>svc.session(auth.token));
   assert.deepEqual(await svc.orders(users[1]),[]);assert.deepEqual(await svc.addresses(users[1]),[]);

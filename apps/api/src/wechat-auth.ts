@@ -44,8 +44,11 @@ export async function wechatPhoneLogin(service:Service,identity:WechatIdentity,b
   ensure(!user?.openId||user.openId===verified.openId,'WECHAT_BOUND','当前账号已绑定其他微信',409);
   ensure(!user?.phone||user.phone===lookup||user.id===byPhone?.id,'PHONE_CHANGE_REQUIRED','此账号已绑定其他手机号，请联系平台处理换绑',409);
   ensure(!user||user.status==='ACTIVE','ACCOUNT_FROZEN','账号已冻结，请联系客服',403);
+  ensure(user||b.agreed===true,'AGREEMENT_REQUIRED','请阅读并同意用户服务协议和隐私政策',400);
   const data={openId:verified.openId,phone:lookup,phoneEncrypted:encrypt(verified.phone),phoneVerifiedAt:service.clock()};
-  user=user?await tx.user.update({where:{id:user.id},data}):await tx.user.create({data:{...data,displayName:'微信用户',roles:['USER']}});
+  const mask='用户'+verified.phone.slice(-4);
+  if(user?.deletionRequestedAt)await service.audit(tx,user.id,'ACCOUNT_DELETION_REVOKED',user.id,{by:'login'});
+  user=user?await tx.user.update({where:{id:user.id},data:{...data,deletionRequestedAt:null,...(!user.displayName||user.displayName==='微信用户'?{displayName:mask}:{})}}):await tx.user.create({data:{...data,displayName:mask,roles:['USER'],agreedAt:service.clock()}});
   const token=randomBytes(32).toString('hex');await tx.appSession.create({data:{id:digest(token),userId:user.id,expiresAt:new Date(service.clock().getTime()+24*3600000)}});
   await service.audit(tx,user.id,'WECHAT_PHONE_LOGIN',user.id,{phoneVerified:true});
   return {token,user:service.publicUser(user)};

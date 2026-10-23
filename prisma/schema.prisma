@@ -72,6 +72,10 @@ model User {
   phoneEncrypted String?
   phoneVerifiedAt DateTime?
   displayName  String?
+  failedLogins Int      @default(0)
+  lockedUntil  DateTime?
+  deletionRequestedAt DateTime?
+  agreedAt     DateTime?
   roles        UserRole[] @default([])
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -80,6 +84,7 @@ model User {
   customerOrders Order[] @relation("CustomerOrders")
   quotes       Quote[]
   auditEvents  AuditEvent[]
+  @@index([deletionRequestedAt])
 }
 
 model Address {
@@ -104,6 +109,7 @@ model Chef {
   userId         String   @unique
   status         String   @default("PENDING_REVIEW")
   healthValidUntil DateTime?
+  insuranceValidUntil DateTime?
   serviceRadiusM Int      @default(3000)
   acceptingOrders Boolean @default(false)
   user           User     @relation(fields: [userId], references: [id])

@@ -9,6 +9,7 @@ try{
  await proxy(page);await page.goto('http://127.0.0.1:10086');
  await page.getByText('没有账号，去注册',{exact:true}).click();
  for(const[i,value]of[username,'新注册用户',password,password].entries())await page.locator('input').nth(i).fill(value);
+ await page.getByText('☐ 我已阅读并同意《用户服务协议》《隐私政策》',{exact:true}).click();await page.getByText('☑ 我已阅读并同意《用户服务协议》《隐私政策》',{exact:true}).waitFor();
  const authResponse=page.waitForResponse(r=>r.url().endsWith('/api/auth/register'));await page.getByText('注册并登录',{exact:true}).click();tokens.push((await(await authResponse).json()).token);
  await page.getByText('附近的好厨师',{exact:true}).waitFor();await idle();
  assert.equal(await page.getByText(/开发沙箱|试运营/).count(),0);
@@ -42,7 +43,7 @@ try{
  await page.getByText('我的',{exact:true}).click();await idle();await page.getByText('退出登录',{exact:true}).click();await page.getByText('没有账号，去注册',{exact:true}).waitFor();
  await page.locator('input').first().fill(username);await page.locator('input').nth(1).fill(password);await page.getByText('登录',{exact:true}).click();await page.getByText('附近的好厨师',{exact:true}).waitFor();await idle();
  const web=await browser.newPage({viewport:{width:1280,height:900}});web.setDefaultTimeout(15000);web.on('pageerror',e=>errors.push(e.message));await proxy(web);await web.goto('http://127.0.0.1:5173');await web.getByRole('button',{name:'注册新用户',exact:true}).click();
- await web.getByLabel('账号',{exact:true}).fill(username+'w');await web.locator('.field').filter({hasText:'昵称'}).locator('input').fill('网页新用户');await web.getByLabel('密码',{exact:true}).fill(password);await web.getByLabel('确认密码',{exact:true}).fill(password);await web.getByRole('button',{name:'注册并登录',exact:true}).click();await web.getByRole('button',{name:'退出',exact:true}).waitFor();
+ await web.getByLabel('账号',{exact:true}).fill(username+'w');await web.locator('.field').filter({hasText:'昵称'}).locator('input').fill('网页新用户');await web.getByLabel('密码',{exact:true}).fill(password);await web.getByLabel('确认密码',{exact:true}).fill(password);await web.getByLabel('同意用户服务协议和隐私政策').check();await web.getByRole('button',{name:'注册并登录',exact:true}).click();await web.getByRole('button',{name:'退出',exact:true}).waitFor();
  await web.getByLabel('搜索服务者').fill(fixture.prefix);await web.waitForFunction(()=>document.querySelectorAll('.chef-card').length===2);
  await web.getByRole('button',{name:'我的订单',exact:true}).click();await web.getByText('还没有订单，去发现一位好厨师吧',{exact:true}).waitFor();assert.equal(await web.getByRole('button',{name:'刷新',exact:true}).count(),0);
  await web.getByRole('button',{name:'退出',exact:true}).click();await web.getByLabel('账号',{exact:true}).fill(username);await web.getByLabel('密码',{exact:true}).fill(password);await web.getByRole('button',{name:'登录',exact:true}).click();await web.getByRole('button',{name:'我的订单',exact:true}).click();await web.getByRole('button',{name:'详情 '+fixture.prefix+'湘菜套餐',exact:true}).click();await web.getByText('订单已保存，请在微信小程序中打开本订单付款；支付未开通时无法扣款，付款期限过后自动取消。',{exact:true}).waitFor();assert.deepEqual(errors,[]);console.log('PASS: both apps registration, real search/cuisine/sort, continuous detail and anchors, favorite add/remove, pending-payment submission, card detail, pull-to-refresh, relogin, separate-user empty orders. All test records are isolated.');

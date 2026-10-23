@@ -8,6 +8,7 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import { PrismaClient } from '@prisma/client';
 import { ChefFinanceService } from './chef-finance';
 import { ApiError, ensure } from './errors';
+import { maskPhones } from './policy';
 
 
 
@@ -56,6 +57,8 @@ class ApiController {
       else if(parts[0]==='ops'&&parts[1]==='finance'&&parts[2]&&parts[3]&&method==='POST')result=await service.reconcileFinance(user,parts[2],parts[3]);
       else if(path==='/maps/config'&&method==='GET'){const key=process.env.TENCENT_MAP_BROWSER_KEY?.trim(),referer=process.env.TENCENT_MAP_REFERER?.trim();result=key&&referer?{enabled:true,key,referer,coordinateSystem:'GCJ02'}:{enabled:false,coordinateSystem:'GCJ02'};}
       else if(path==='/me'&&method==='GET')result=service.publicUser(user);
+      else if(path==='/me/deletion'&&method==='POST')result=await service.requestDeletion(user,b);
+      else if(path==='/chef/certificates'&&method==='POST')result=await service.submitCertificate(user,b);
       else if(path==='/auth/logout'&&method==='POST')result=await service.logout(token);
       else if(path==='/rules'&&method==='GET')result=await service.rules(db);
       else if(path==='/addresses')result=method==='GET'?await service.addresses(user):method==='POST'?await service.address(user,b):undefined;
@@ -76,6 +79,7 @@ class ApiController {
       else if(parts[0]==='orders'&&parts[1]){
         const id=parts[1],action=parts[2];
         if(!action&&method==='GET')result=await service.getOrder(user,id);
+        else if(action==='cancel-preview'&&method==='GET')result=await service.cancelPreview(user,id);
         else if(action==='messages'&&['GET','POST'].includes(method))result=await service.messages(user,id,method==='POST'?b:undefined);
         else if(method==='POST'){
           if(action==='changes')result=await service.change(user,id,b);
@@ -96,6 +100,7 @@ class ApiController {
         if(path==='/ops/dashboard'&&method==='GET')result=await service.dashboard(user);
         else if(path==='/ops/chefs'&&method==='GET')result=await service.opsChefs(user);
         else if(parts[1]==='chefs'&&parts[2]&&parts[3]==='manage'&&method==='POST')result=await service.manageChef(user,parts[2],b);
+        else if(parts[1]==='chefs'&&parts[2]&&parts[3]==='certificates'&&method==='POST')result=await service.reviewCertificate(user,parts[2],b);
         else if(parts[1]==='chefs'&&parts[2]&&method==='POST')result=await service.auditChef(user,parts[2],b);
         else if(path==='/ops/users'&&method==='GET')result=await service.opsUsers(user);
         else if(parts[1]==='users'&&parts[2]&&parts[3]==='phone'&&method==='GET')result=await service.revealUserPhone(user,parts[2]);
@@ -112,6 +117,11 @@ class ApiController {
         else if(path==='/ops/ledger'&&method==='GET'){service.role(user,'FINANCE','FINANCE_MANAGER');result=await db.ledgerEntry.findMany({orderBy:{createdAt:'desc'},take:500});}
       }
       if(result===undefined)throw new ApiError(404,'NOT_FOUND','接口不存在');
+      if(parts[0]!=='ops'){
+        // SRS 7.2: user-facing responses must not carry plaintext mobile numbers; staff reveal stays under audited /ops routes.
+        const scanned=maskPhones(JSON.stringify(result));
+        if(scanned.count){log('warn','pii.egress_masked',{service:'api',requestId:req.id,route:logRoute(path),count:scanned.count});return res.header('cache-control','no-store').header('content-type','application/json; charset=utf-8').send(scanned.text);}
+      }
       return res.header('cache-control','no-store').send(result);
     }catch(e:any){
       const err=e instanceof ApiError?e:new ApiError(500,'INTERNAL_ERROR','服务暂时不可用');
