@@ -12,11 +12,13 @@ export async function uploadImage(orderId?:string){
  const selected=await Taro.chooseImage({count:1,sizeType:['compressed'],sourceType:['album','camera']}),filePath=selected.tempFilePaths[0];
  let base64:string,mime='image/jpeg';
  if(process.env.TARO_ENV==='h5'){
-  const blob=await(await fetch(filePath)).blob();mime=blob.type;
+  const blob=await(await fetch(filePath)).blob();mime=blob.type||'application/octet-stream';
   base64=await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=reject;reader.readAsDataURL(blob);});
  }else{
   base64=await new Promise<string>((resolve,reject)=>Taro.getFileSystemManager().readFile({filePath,encoding:'base64',success:r=>resolve(r.data as string),fail:reject}));
   if(base64.startsWith('iVBOR'))mime='image/png';
+  else if(base64.startsWith('R0lGOD'))mime='image/gif';
+  else if(base64.startsWith('UklGR'))mime='image/webp';
  }
  return api('/files',{base64,mime,orderId});
 }

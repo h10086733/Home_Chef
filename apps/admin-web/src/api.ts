@@ -8,6 +8,7 @@ export async function api(path:string,body?:unknown,method?:string){
 }
 export async function upload(file:File,orderId?:string){
  if(file.size>3*1024*1024)throw new Error('图片不能超过3MB');
+ if(file.size<8)throw new Error('图片内容不完整');
  const base64=await new Promise<string>((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(',')[1]);r.onerror=reject;r.readAsDataURL(file);});
- return api('/files',{mime:file.type,base64,orderId});
+ return api('/files',{mime:file.type||'application/octet-stream',base64,orderId});
 }

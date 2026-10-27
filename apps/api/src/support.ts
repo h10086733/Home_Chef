@@ -6,6 +6,19 @@ import { decrypt, digest } from './security';
 import { commissionFen, imRisk, remainingChefFen, srsInput } from './policy';
 type Data=Record<string,any>;
 type Tx=Prisma.TransactionClient;
+const IMAGE_TYPES=['image/png','image/jpeg','image/webp','image/gif','image/avif'];
+function imageType(bytes:Buffer){
+ if(bytes.length>=8&&bytes.subarray(0,8).toString('hex')==='89504e470d0a1a0a')return 'image/png';
+ if(bytes.length>=3&&bytes[0]===0xff&&bytes[1]===0xd8&&bytes[2]===0xff)return 'image/jpeg';
+ if(bytes.length>=12&&bytes.subarray(0,4).toString('ascii')==='RIFF'&&bytes.subarray(8,12).toString('ascii')==='WEBP')return 'image/webp';
+ if(bytes.length>=6&&(bytes.subarray(0,6).toString('ascii')==='GIF87a'||bytes.subarray(0,6).toString('ascii')==='GIF89a'))return 'image/gif';
+ if(bytes.length>=12&&bytes.subarray(4,8).toString('ascii')==='ftyp'){
+  const box=Math.min(bytes.readUInt32BE(0),bytes.length,64);
+  const brands=bytes.subarray(8,Math.max(12,box)).toString('ascii');
+  if(brands.includes('avif')||brands.includes('avis'))return 'image/avif';
+ }
+ return '';
+}
 export class MvpService extends Service {
 
 
@@ -95,10 +108,11 @@ export class MvpService extends Service {
     ensure(!('blocked' in result && result.blocked===true),'SENSITIVE_MESSAGE','消息包含联系方式或线下交易信息，已拦截并留痕',400);return result;
   }
   async upload(user:User,b:Data) {
-    const mime=text(b.mime,'文件类型',50);ensure(['image/png','image/jpeg'].includes(mime),'INVALID_FILE','仅支持 PNG/JPEG 图片',400);
-    const encoded=text(b.base64,'图片内容',4300000);ensure(/^[A-Za-z0-9+/]*={0,2}$/.test(encoded),'INVALID_FILE','图片编码无效',400);
-    const bytes=Buffer.from(encoded,'base64');ensure(bytes.length>8&&bytes.length<=3*1024*1024,'FILE_SIZE','图片不能超过3MB',400);
-    ensure(mime==='image/png'?bytes.subarray(0,8).toString('hex')==='89504e470d0a1a0a':bytes[0]===255&&bytes[1]===216&&bytes[2]===255,'INVALID_FILE','文件内容与图片类型不符',400);
+    const encoded=text(b.base64,'图片内容',4300000).replace(/\s/g,'');ensure(/^[A-Za-z0-9+/]*={0,2}$/.test(encoded),'INVALID_FILE','图片编码无效',400);
+    const bytes=Buffer.from(encoded,'base64');
+    ensure(bytes.length<=3*1024*1024,'FILE_SIZE','图片不能超过3MB',400);
+    ensure(bytes.length>=8,'INVALID_FILE','图片内容不完整',400);
+    const mime=imageType(bytes);ensure(IMAGE_TYPES.includes(mime),'INVALID_FILE','仅支持 PNG、JPEG、WebP、GIF、AVIF 图片',400);
     return this.transaction(async tx=>{
       if(b.orderId){const o=await this.authorizedOrder(tx,user,text(b.orderId,'订单'));const c=await tx.chef.findUnique({where:{userId:user.id}});ensure(o.customerId===user.id||o.acceptedChefId===c?.id,'FORBIDDEN','仅本单双方可以上传凭证',403);}
       const file=await tx.fileAsset.create({data:{userId:user.id,orderId:b.orderId??null,mime,bytes,sha256:digest(encoded)}});
