@@ -65,6 +65,7 @@ class ApiController {
       else if(parts[0]==='addresses'&&parts[1]&&method==='DELETE')result=await service.deleteAddress(user,parts[1]);
       else if(path==='/chefs'&&method==='GET')result=await service.chefs(req.query);
       else if(parts[0]==='chefs'&&parts[2]==='reviews'&&method==='GET')result=await db.review.findMany({where:{chefId:parts[1],hidden:false},select:{taste:true,service:true,punctuality:true,body:true,followup:true,createdAt:true},take:50});
+      else if(parts[0]==='chefs'&&parts[2]==='schedules'&&method==='GET'){const hours=Number(req.query.hours??2);result=await service.openSchedules(parts[1],Number.isInteger(hours)?hours:0);}
       else if(path==='/chef/profile')result=method==='GET'?await service.chefProfile(user):method==='POST'?await service.applyChef(user,b):undefined;
       else if(path==='/chef/packages'&&method==='POST')result=await service.savePackage(user,b);
       else if(path==='/chef/schedules'&&method==='POST')result=await service.saveSchedule(user,b);

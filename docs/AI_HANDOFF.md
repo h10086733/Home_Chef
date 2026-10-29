@@ -77,6 +77,8 @@ bash scripts/pnpm.sh db:migrate
 
 V1.0 规则（2026-10-23）：只有已发布规则含 `srsVersion:'1.0'` 时生效，按订单 `ruleSnapshot` 判断，`srs(rules)` 返回 null 即旧口径。发布接口 `POST /ops/rules` 经 `srsInput` 校验参数。新增路由：`POST /me/deletion`（注销申请）、`GET /orders/:id/cancel-preview`（取消扣费预览，取消时可带 `expectedDeductFen` 防规则变化）、`POST /chef/certificates`（健康证/意外险续期提交）、`POST /ops/chefs/:id/certificates`（审核员审批）。worker tick 新增自动结算、证照到期停单/提醒、注销到期匿名化。迁移 `202610230001_srs_v1_rules`。
 
+2026-10-29：`202610290001_chef_radius_default` 只把新厨师行的 `serviceRadiusM` 列默认值改为 15000，不回写已有厨师。本机业务库和两个隔离测试库已执行 `db:migrate`；生产未迁移、未重启。
+
 ## 交易不变量
 
 - 金额统一用整数“分”，服务端报价和订单规则快照为准。

@@ -56,6 +56,16 @@ test('Real-data business flow',async t=>{
   await assert.rejects(()=>svc.saveSchedule(users[2],{startsAt:future,endsAt:future}),/结束时间必须晚于开始时间/);
   await assert.rejects(()=>svc.saveSchedule(users[2],{startsAt:future,endsAt:new Date(now.getTime()+33*86400000).toISOString()}),/不能超过31天/);
  });
+ await t.test('open schedules list bookable times inside the published slot',async()=>{
+  const slotStart=now.getTime()+86400000;
+  const rows=await svc.openSchedules(chefs[0].id,2);
+  assert.ok(rows.times.length>0&&rows.times.length<=96);
+  const first=new Date(rows.times[0]).getTime();
+  assert.ok(first>=slotStart+3600000);
+  assert.equal(rows.times.some(item=>new Date(item).getTime()<slotStart),false);
+  assert.equal(rows.times.every(item=>['00','30'].includes(new Date(new Date(item).getTime()+8*3600000).toISOString().slice(14,16))),true);
+  await assert.rejects(()=>svc.openSchedules('missing-chef',2),/厨师不存在/);
+ });
  await t.test('database search, cuisine, price and geographic filters change results',async()=>{
   assert.equal((await svc.chefs({search:prefix})).length,2);
   assert.deepEqual((await svc.chefs({search:prefix,cuisine:'湘菜'})).map(c=>c.id),[chefs[0].id]);

@@ -14,6 +14,10 @@ function radiusMeters(rules: Data) {
   const configured = Number(rules?.radiusM);
   return Number.isFinite(configured) && configured > 3000 ? configured : SERVICE_RADIUS_M;
 }
+function alignHalfHour(ms: number) {
+  const offset = 8 * HOUR, step = 30 * 60000;
+  return Math.ceil((ms + offset) / step) * step - offset;
+}
 const SAFE_CHEF = { id: true, status: true, healthValidUntil: true, serviceRadiusM: true, acceptingOrders: true, user: { select: { displayName: true } }, packages: { where: { active: true } } } as const;
 export class Service {
   constructor(readonly db: PrismaClient, readonly clock: () => Date = () => new Date()) {}
@@ -212,6 +216,41 @@ export class Service {
       ensure(endsAt.getTime()-startsAt.getTime()<=31*24*HOUR,'INVALID_TIME','单个档期不能超过31天，请分段添加',400);
       return tx.scheduleSlot.create({ data: { chefId: c.id, startsAt, endsAt } });
     });
+  }
+  async openSchedules(chefId: string, hours: number) {
+    const duration = integer(hours, '服务时长', 1, 8);
+    const chef = await this.db.chef.findUnique({ where: { id: chefId } });
+    ensure(chef, 'NOT_FOUND', '厨师不存在', 404);
+    const rules = await this.rules(this.db), version = srs(rules);
+    const now = this.clock().getTime();
+    const earliest = now + (version?.minAdvanceHours ?? 24) * HOUR;
+    const latest = now + (version?.maxAdvanceDays ?? 30) * 24 * HOUR;
+    const slots = await this.db.scheduleSlot.findMany({
+      where: { chefId, status: 'AVAILABLE', endsAt: { gt: new Date(earliest) } },
+      orderBy: { startsAt: 'asc' },
+      take: 40,
+      select: { startsAt: true, endsAt: true },
+    });
+    const locks = await this.db.bookingLock.findMany({
+      where: { chefId, OR: [{ expiresAt: null }, { expiresAt: { gt: this.clock() } }] },
+      select: { startsAt: true, endsAt: true },
+    });
+    const bookable = chef.acceptingOrders && ['APPROVED', 'TRIAL'].includes(chef.status);
+    const times: string[] = [];
+    if (bookable) {
+      for (const slot of slots) {
+        let cursor = alignHalfHour(Math.max(slot.startsAt.getTime() + HOUR, earliest));
+        const last = Math.min(slot.endsAt.getTime() - (duration + 1) * HOUR, latest);
+        while (cursor <= last && times.length < 96) {
+          const serviceEnd = new Date(cursor + duration * HOUR);
+          const overlaps = locks.some(lock => cursor - HOUR < lock.endsAt.getTime() && cursor + (duration + 1) * HOUR > lock.startsAt.getTime());
+          if (!overlaps && chef.healthValidUntil && chef.healthValidUntil > serviceEnd && insuranceOk(version, chef.insuranceValidUntil, serviceEnd)) times.push(new Date(cursor).toISOString());
+          cursor += 30 * 60000;
+        }
+      }
+    }
+    const reason = !bookable ? '这位厨师当前不可预约' : times.length ? '' : slots.length ? '已有档期，但没有满足提前量和前后 1 小时缓冲的时间' : '还没有可约档期';
+    return { hours: duration, times, reason, slots: slots.map(slot => ({ startsAt: slot.startsAt.toISOString(), endsAt: slot.endsAt.toISOString() })) };
   }
   distance(lat1: number, lng1: number, lat2: number, lng2: number) {
     const rad = Math.PI / 180, a = Math.sin((lat2-lat1)*rad/2)**2 + Math.cos(lat1*rad)*Math.cos(lat2*rad)*Math.sin((lng2-lng1)*rad/2)**2;
